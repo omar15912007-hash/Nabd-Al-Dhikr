@@ -1,0 +1,11 @@
+# Core training & ONNX quantization pipeline for Nabd Al-Dhikr AI
+torch>=2.3.0
+sentence-transformers>=3.0.1
+transformers>=4.44.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+datasets>=2.20.0
+accelerate>=0.33.0
+onnx>=1.16.1
+onnxruntime>=1.19.2
+numpy>=1.26.4

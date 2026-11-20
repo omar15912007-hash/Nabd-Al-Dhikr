@@ -12,3 +12,8 @@ local.properties
 .externalNativeBuild
 .cxx
 .kotlin
+ai_pipeline/_build_work/
+ai_pipeline/dist/
+ai_pipeline/**/__pycache__/
+ai_pipeline/data/.checkpoint_*.json
+*API KEY*.txt

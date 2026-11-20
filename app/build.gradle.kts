@@ -13,10 +13,16 @@ android {
         applicationId = "com.nabdaldhikr.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
 
@@ -82,6 +88,10 @@ dependencies {
 
     // Lifecycle Runtime Compose
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+
+    // Offline AI Engine (ONNX Runtime Android with ARM NEON acceleration) & Resumable Downloader (OkHttp)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)

@@ -20,6 +20,7 @@ import com.nabdaldhikr.app.ui.screens.SearchScreen
 import com.nabdaldhikr.app.ui.screens.SettingsScreen
 import com.nabdaldhikr.app.ui.screens.SplashScreen
 import com.nabdaldhikr.app.ui.screens.TasbihScreen
+import com.nabdaldhikr.app.viewmodel.AiAssistantViewModel
 import com.nabdaldhikr.app.viewmodel.AzkarViewModel
 import com.nabdaldhikr.app.viewmodel.SettingsViewModel
 import com.nabdaldhikr.app.viewmodel.TasbihViewModel
@@ -29,6 +30,7 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
     val navController = rememberNavController()
     val azkarViewModel: AzkarViewModel = viewModel()
     val tasbihViewModel: TasbihViewModel = viewModel()
+    val aiAssistantViewModel: AiAssistantViewModel = viewModel()
     
     NavHost(
         navController = navController,
@@ -55,7 +57,8 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
         composable("home") {
             HomeScreen(
                 navController = navController,
-                azkarViewModel = azkarViewModel
+                azkarViewModel = azkarViewModel,
+                aiViewModel = aiAssistantViewModel
             )
         }
         composable("azkar/{categoryId}") { backStackEntry ->
@@ -74,7 +77,8 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
                 initialIndex = azkarIndex,
                 navController = navController,
                 azkarViewModel = azkarViewModel,
-                settingsViewModel = settingsViewModel
+                settingsViewModel = settingsViewModel,
+                aiViewModel = aiAssistantViewModel
             )
         }
         composable("tasbih") {
@@ -92,7 +96,8 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
         composable("settings") {
             SettingsScreen(
                 navController = navController,
-                viewModel = settingsViewModel
+                viewModel = settingsViewModel,
+                aiViewModel = aiAssistantViewModel
             )
         }
         composable("favorites") {
@@ -104,7 +109,8 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
         composable("search") {
             SearchScreen(
                 navController = navController,
-                azkarViewModel = azkarViewModel
+                azkarViewModel = azkarViewModel,
+                aiViewModel = aiAssistantViewModel
             )
         }
     }

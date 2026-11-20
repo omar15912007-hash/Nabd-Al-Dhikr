@@ -45,8 +45,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.NavController
+import com.nabdaldhikr.app.ui.components.AiModelManagerSheet
+import com.nabdaldhikr.app.ui.components.DhikrAiBottomSheet
 import com.nabdaldhikr.app.ui.components.GoldDivider
 import com.nabdaldhikr.app.ui.theme.*
+import com.nabdaldhikr.app.viewmodel.AiAssistantViewModel
 import com.nabdaldhikr.app.viewmodel.AzkarViewModel
 import com.nabdaldhikr.app.viewmodel.SettingsViewModel
 import kotlinx.coroutines.delay
@@ -59,9 +62,11 @@ fun AzkarDetailScreen(
     initialIndex: Int,
     navController: NavController,
     azkarViewModel: AzkarViewModel,
-    settingsViewModel: SettingsViewModel
+    settingsViewModel: SettingsViewModel,
+    aiViewModel: AiAssistantViewModel
 ) {
     val category = azkarViewModel.getCategory(categoryId) ?: return
+    val allCategories by azkarViewModel.categories.collectAsState()
     var currentIndex by remember {
         mutableIntStateOf(initialIndex.coerceIn(0, category.azkarList.lastIndex))
     }
@@ -77,9 +82,11 @@ fun AzkarDetailScreen(
     val view = LocalView.current
     val coroutineScope = rememberCoroutineScope()
 
-    // تحكم سريع بحجم الخط المباشر
+    // تحكم سريع بحجم الخط المباشر وحالة نافذة المساعد الذكي
     var fontScaleDelta by remember { mutableFloatStateOf(0f) }
     var showCompletionDialog by remember { mutableStateOf(false) }
+    var showAiSheet by remember { mutableStateOf(false) }
+    var showModelManagerSheet by remember { mutableStateOf(false) }
 
     // تأثير النبض للزر
     var buttonScale by remember { mutableFloatStateOf(1f) }
@@ -153,6 +160,15 @@ fun AzkarDetailScreen(
                     }
                 },
                 actions = {
+                    // أيقونة الذكاء الاصطناعي الذهبية (✨) لفتح نافذة الشرح ومعاني الكلمات والأسئلة المقترحة
+                    IconButton(onClick = { showAiSheet = true }) {
+                        Icon(
+                            imageVector = AppIcons.AutoAwesome,
+                            contentDescription = "المساعد الذكي للذكر",
+                            tint = PrimaryGold
+                        )
+                    }
+
                     // زر تكبير الخط A+
                     IconButton(onClick = {
                         if (fontScaleDelta < 8f) fontScaleDelta += 2f
@@ -439,6 +455,29 @@ fun AzkarDetailScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
         }
+    }
+
+    // نافذة المساعد الذكي للذكر (شرح ميسر + معاني الكلمات + أسئلة مقترحة)
+    if (showAiSheet) {
+        DhikrAiBottomSheet(
+            categoryId = categoryId,
+            categoryName = category.nameAr,
+            azkar = currentAzkar,
+            allCategories = allCategories,
+            aiViewModel = aiViewModel,
+            onOpenModelManager = {
+                showAiSheet = false
+                showModelManagerSheet = true
+            },
+            onDismiss = { showAiSheet = false }
+        )
+    }
+
+    if (showModelManagerSheet) {
+        AiModelManagerSheet(
+            aiViewModel = aiViewModel,
+            onDismiss = { showModelManagerSheet = false }
+        )
     }
 
     // نافذة الاحتفال بإتمام الورد

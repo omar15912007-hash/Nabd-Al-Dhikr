@@ -1,0 +1,90 @@
+name: Build & Deploy Offline AI Assets to GitHub Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      ai_tag:
+        description: 'AI Release Tag (e.g., ai-v1.0.0)'
+        required: true
+        default: 'ai-v1.0.0'
+      epochs:
+        description: 'Fine-tuning epochs (0 = export base multilingual MiniLM)'
+        required: false
+        default: '2'
+      fp16_vectors:
+        description: 'Store pre-computed vectors in FP16 for 50% smaller downloads'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - 'ai_pipeline/data/db_*.json'
+      - 'ai_pipeline/prepare_model.py'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish-ai:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'ai_pipeline/requirements.txt'
+
+      - name: Install AI Pipeline Dependencies (CPU Torch + ONNX)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -r ai_pipeline/requirements.txt
+
+      - name: Validate All Multilingual Adhkar Datasets
+        run: python ai_pipeline/validate_dataset.py
+
+      - name: Fine-Tune, Quantize INT8 ONNX & Pre-Compute Vectors
+        env:
+          AI_TAG: ${{ github.event.inputs.ai_tag || 'ai-v1.0.0' }}
+          EPOCHS: ${{ github.event.inputs.epochs || '2' }}
+          FP16_FLAG: ${{ github.event.inputs.fp16_vectors == 'true' && '--fp16-vectors' || '' }}
+        run: |
+          python ai_pipeline/prepare_model.py \
+            --repo "${{ github.repository }}" \
+            --tag "$AI_TAG" \
+            --epochs "$EPOCHS" \
+            $FP16_FLAG
+
+      - name: Inspect Built AI Artifacts
+        run: ls -lh ai_pipeline/dist/
+
+      - name: Publish AI Model & Language Packs to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.ai_tag || 'ai-v1.0.0' }}
+          name: "نبض الذكر — حزمة الذكاء الاصطناعي (${{ github.event.inputs.ai_tag || 'ai-v1.0.0' }})"
+          body: |
+            ### حزمة الذكاء الاصطناعي المحلي لتطبيق نبض الذكر (Nabd Al-Dhikr Offline AI)
+
+            - **النموذج المضغوط:** `nabd_ai_minilm.onnx` (INT8 `paraphrase-multilingual-MiniLM-L12-v2`)
+            - **المحلل اللغوي:** `tokenizer.json`
+            - **فهرس التحقق:** `manifest.json` (بصمات SHA-256 وأحجام الملفات)
+            - **حزم اللغات والمتجهات المسبقة:** `vectors_[lang].bin` + `db_[lang].json`
+          draft: false
+          prerelease: false
+          files: |
+            ai_pipeline/dist/nabd_ai_minilm.onnx
+            ai_pipeline/dist/tokenizer.json
+            ai_pipeline/dist/manifest.json
+            ai_pipeline/dist/vectors_*.bin
+            ai_pipeline/dist/db_*.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

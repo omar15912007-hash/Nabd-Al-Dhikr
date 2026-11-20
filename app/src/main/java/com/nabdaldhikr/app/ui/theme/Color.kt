@@ -18,6 +18,9 @@ val ProgressTrack = Color(0xFF2E5B4A)    // مسار شريط التقدم ال�
 val DialogBg = Color(0xFF2A2A2E)         // خلفية الـ Dialog
 val CardBorder = Color(0xFF235841)       // إطار الكروت
 val GoldGlow = Color(0x33C9A24B)         // توهج ذهبي خفيف
+val AiSheetBg = Color(0xFF122B22)        // خلفية نافذة المساعد الذكي
+val AiChipBg = Color(0xFF1A3D30)         // خلفية شرائح الأسئلة الذكية
+val WarningAmber = Color(0xFFE6A23C)     // تنبيه التوافق المتوسط
 
 // تدرجات لونية عصرية
 val ScreenGradient = Brush.verticalGradient(

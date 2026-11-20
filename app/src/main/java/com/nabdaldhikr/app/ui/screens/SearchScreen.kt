@@ -1,5 +1,6 @@
 package com.nabdaldhikr.app.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,8 +18,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.nabdaldhikr.app.ai.AiQueryOutcome
 import com.nabdaldhikr.app.data.model.Azkar
 import com.nabdaldhikr.app.ui.theme.*
+import com.nabdaldhikr.app.viewmodel.AiAssistantViewModel
 import com.nabdaldhikr.app.viewmodel.AzkarViewModel
 
 private data class SearchResult(
@@ -32,10 +35,16 @@ private data class SearchResult(
 @Composable
 fun SearchScreen(
     navController: NavController,
-    azkarViewModel: AzkarViewModel
+    azkarViewModel: AzkarViewModel,
+    aiViewModel: AiAssistantViewModel
 ) {
     val categories by azkarViewModel.categories.collectAsState()
+    val aiOutcome by aiViewModel.homeSearchOutcome.collectAsState()
     var query by remember { mutableStateOf("") }
+
+    DisposableEffect(Unit) {
+        onDispose { aiViewModel.clearHomeSearch() }
+    }
 
     // تجريد التشكيل وتطبيع الهمزات للبحث العربي
     val tashkeelRegex = remember { Regex("[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]") }
@@ -69,8 +78,11 @@ fun SearchScreen(
                 title = {
                     OutlinedTextField(
                         value = query,
-                        onValueChange = { query = it },
-                        placeholder = { Text("ابحث عن ذكر...", color = TextSecondary) },
+                        onValueChange = { updated ->
+                            query = updated
+                            aiViewModel.runSemanticSearch(updated, categories)
+                        },
+                        placeholder = { Text("ابحث بذكر أو شعور (مثلاً: قلقان، سفر)...", color = TextSecondary, fontSize = 13.sp) },
                         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = PrimaryGold) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -116,19 +128,37 @@ fun SearchScreen(
                     color = TextPrimary
                 )
             }
-        } else if (results.isEmpty()) {
+        } else if (results.isEmpty() && aiOutcome !is AiQueryOutcome.Match) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(padding),
+                    .padding(padding)
+                    .padding(24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "لا توجد نتائج",
-                    fontSize = 16.sp,
-                    color = TextSecondary
-                )
+                val blocked = aiOutcome as? AiQueryOutcome.BlockedOutOfScope
+                if (blocked != null) {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = AiSheetBg),
+                        border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.45f))
+                    ) {
+                        Text(
+                            text = blocked.message,
+                            fontSize = 14.sp,
+                            color = TextPrimary,
+                            lineHeight = 22.sp,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "لا توجد نتائج",
+                        fontSize = 16.sp,
+                        color = TextSecondary
+                    )
+                }
             }
         } else {
             LazyColumn(
@@ -138,6 +168,82 @@ fun SearchScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                val semanticMatchOutcome = aiOutcome as? AiQueryOutcome.Match
+                if (semanticMatchOutcome != null) {
+                    item(key = "ai_semantic_header") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = AppIcons.AutoAwesome,
+                                contentDescription = null,
+                                tint = PrimaryGold,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "نتائج البحث الدلالي الذكي ✨ (${semanticMatchOutcome.latencyMs}ms)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = PrimaryGold
+                            )
+                        }
+                    }
+                    val aiMatches = listOf(semanticMatchOutcome.bestMatch) + semanticMatchOutcome.alternatives
+                    items(aiMatches, key = { "ai_${it.categoryId}_${it.dhikrId}" }) { match ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val cat = azkarViewModel.getCategory(match.categoryId)
+                                    val idx = cat?.azkarList?.indexOfFirst { it.id == match.dhikrId }
+                                        ?.takeIf { it >= 0 } ?: (match.orderIndex - 1).coerceAtLeast(0)
+                                    if (match.categoryId.isNotBlank()) {
+                                        navController.navigate("azkar_detail/${match.categoryId}/$idx")
+                                    }
+                                },
+                            shape = RoundedCornerShape(20.dp),
+                            colors = CardDefaults.cardColors(containerColor = AiSheetBg),
+                            border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.5f))
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = match.categoryName,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = PrimaryGold
+                                    )
+                                    Text(
+                                        text = "تطابق ${(match.similarityScore * 100).toInt()}%",
+                                        fontSize = 11.sp,
+                                        color = CompletedGreen
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = match.dhikrText,
+                                    fontSize = 15.sp,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = TextPrimary
+                                )
+                                if (match.shortVirtue.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = match.shortVirtue,
+                                        fontSize = 12.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 items(results, key = { "${it.categoryId}_${it.azkar.id}" }) { result ->
                     Card(
                         modifier = Modifier

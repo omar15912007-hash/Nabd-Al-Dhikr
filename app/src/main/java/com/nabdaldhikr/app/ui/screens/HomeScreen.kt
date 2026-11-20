@@ -6,15 +6,19 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ExitToApp
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -35,12 +39,16 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.nabdaldhikr.app.R
+import com.nabdaldhikr.app.ai.AiQueryOutcome
+import com.nabdaldhikr.app.ui.components.AiModelManagerSheet
 import com.nabdaldhikr.app.ui.components.CategoryCard
 import com.nabdaldhikr.app.ui.theme.*
+import com.nabdaldhikr.app.viewmodel.AiAssistantViewModel
 import com.nabdaldhikr.app.viewmodel.AzkarViewModel
 
 data class CategoryItem(val id: String, val nameAr: String, val nameEn: String, val icon: ImageVector)
@@ -78,8 +86,18 @@ val categoriesList = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(navController: NavController, azkarViewModel: AzkarViewModel) {
+fun HomeScreen(
+    navController: NavController,
+    azkarViewModel: AzkarViewModel,
+    aiViewModel: AiAssistantViewModel
+) {
     val counters by azkarViewModel.counters.collectAsState()
+    val allCategories by azkarViewModel.categories.collectAsState()
+    val homeSearchOutcome by aiViewModel.homeSearchOutcome.collectAsState()
+    val isNeuralReady by aiViewModel.isNeuralModelReady.collectAsState()
+    val capability by aiViewModel.capabilityReport.collectAsState()
+    var smartQuery by remember { mutableStateOf("") }
+    var showModelManager by remember { mutableStateOf(false) }
 
     // نبض خفيف للأزرار العائمة
     val infiniteTransition = rememberInfiniteTransition(label = "FabPulse")
@@ -291,6 +309,216 @@ fun HomeScreen(navController: NavController, azkarViewModel: AzkarViewModel) {
                 }
             }
 
+            // بطاقة البحث الدلالي الذكي (Smart Semantic Search) على الشاشة الرئيسية
+            item(span = { GridItemSpan(2) }) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = AiSheetBg),
+                    border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.4f))
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = AppIcons.AutoAwesome,
+                                    contentDescription = "البحث الذكي",
+                                    tint = PrimaryGold,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "البحث الذكي بالأذكار ✨",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = PrimaryGold
+                                )
+                            }
+                            Surface(
+                                modifier = Modifier.clickable { showModelManager = true },
+                                shape = RoundedCornerShape(10.dp),
+                                color = AiChipBg,
+                                border = BorderStroke(
+                                    1.dp,
+                                    when {
+                                        isNeuralReady -> CompletedGreen.copy(alpha = 0.6f)
+                                        !capability.canDownload -> androidx.compose.ui.graphics.Color(0xFFE57373).copy(alpha = 0.7f)
+                                        else -> PrimaryGold.copy(alpha = 0.45f)
+                                    }
+                                )
+                            ) {
+                                Text(
+                                    text = when {
+                                        isNeuralReady -> "ONNX نشط ✓"
+                                        !capability.canDownload -> "الجهاز غير متوافق"
+                                        else -> "فحص وتحميل AI"
+                                    },
+                                    color = when {
+                                        isNeuralReady -> CompletedGreen
+                                        !capability.canDownload -> androidx.compose.ui.graphics.Color(0xFFE57373)
+                                        else -> PrimaryGold
+                                    },
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = smartQuery,
+                            onValueChange = { updated ->
+                                smartQuery = updated
+                                aiViewModel.runSemanticSearch(updated, allCategories)
+                            },
+                            placeholder = {
+                                Text(
+                                    text = "اسأل بمشاعرك أو حالك (مثلاً: قلقان، أرق، مسافر)...",
+                                    color = TextSecondary,
+                                    fontSize = 12.5.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Search, contentDescription = null, tint = PrimaryGold, modifier = Modifier.size(20.dp))
+                            },
+                            trailingIcon = {
+                                if (smartQuery.isNotEmpty()) {
+                                    IconButton(onClick = {
+                                        smartQuery = ""
+                                        aiViewModel.clearHomeSearch()
+                                    }) {
+                                        Icon(Icons.Filled.Close, contentDescription = "مسح", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = PrimaryGold,
+                                unfocusedBorderColor = CardBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary,
+                                cursorColor = PrimaryGold,
+                                focusedContainerColor = ScreenBg.copy(alpha = 0.5f),
+                                unfocusedContainerColor = ScreenBg.copy(alpha = 0.35f)
+                            )
+                        )
+
+                        if (smartQuery.isBlank()) {
+                            val quickEmotions = remember {
+                                listOf("قلقان ومهموم", "مش عارف أنام", "طالع أسافر", "دعاء لمريض", "الرقية من الحسد")
+                            }
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(quickEmotions) { prompt ->
+                                    SuggestionChip(
+                                        onClick = {
+                                            smartQuery = prompt
+                                            aiViewModel.runSemanticSearch(prompt, allCategories)
+                                        },
+                                        label = { Text(prompt, fontSize = 11.5.sp, color = TextPrimary) },
+                                        colors = SuggestionChipDefaults.suggestionChipColors(containerColor = AiChipBg),
+                                        border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.3f)),
+                                        shape = RoundedCornerShape(18.dp)
+                                    )
+                                }
+                            }
+                        } else {
+                            when (val outcome = homeSearchOutcome) {
+                                is AiQueryOutcome.Match -> {
+                                    val displayMatches = listOf(outcome.bestMatch) + outcome.alternatives.take(2)
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        displayMatches.forEach { match ->
+                                            Surface(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        val cat = azkarViewModel.getCategory(match.categoryId)
+                                                        val idx = cat?.azkarList?.indexOfFirst { it.id == match.dhikrId }
+                                                            ?.takeIf { it >= 0 } ?: (match.orderIndex - 1).coerceAtLeast(0)
+                                                        if (match.categoryId.isNotBlank()) {
+                                                            navController.navigate("azkar_detail/${match.categoryId}/$idx")
+                                                        }
+                                                    },
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = CardBg,
+                                                border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.35f))
+                                            ) {
+                                                Column(modifier = Modifier.padding(12.dp)) {
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Text(
+                                                            text = match.categoryName,
+                                                            color = PrimaryGold,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 12.sp
+                                                        )
+                                                        Text(
+                                                            text = "${(match.similarityScore * 100).toInt()}% • ${outcome.latencyMs}ms",
+                                                            color = CompletedGreen,
+                                                            fontSize = 11.sp
+                                                        )
+                                                    }
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(
+                                                        text = match.dhikrText,
+                                                        color = TextPrimary,
+                                                        fontSize = 14.sp,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    if (match.shortVirtue.isNotBlank()) {
+                                                        Spacer(modifier = Modifier.height(3.dp))
+                                                        Text(
+                                                            text = match.shortVirtue,
+                                                            color = TextSecondary,
+                                                            fontSize = 11.5.sp,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                is AiQueryOutcome.BlockedOutOfScope -> {
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = HeaderBg,
+                                        border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.35f))
+                                    ) {
+                                        Text(
+                                            text = outcome.message,
+                                            color = TextPrimary,
+                                            fontSize = 12.5.sp,
+                                            lineHeight = 19.sp,
+                                            modifier = Modifier.padding(12.dp)
+                                        )
+                                    }
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                }
+            }
+
             items(categoriesList, key = { it.id }) { item ->
                 val progress = azkarViewModel.getCategoryProgress(item.id, counters)
                 CategoryCard(
@@ -300,5 +528,12 @@ fun HomeScreen(navController: NavController, azkarViewModel: AzkarViewModel) {
                 )
             }
         }
+    }
+
+    if (showModelManager) {
+        AiModelManagerSheet(
+            aiViewModel = aiViewModel,
+            onDismiss = { showModelManager = false }
+        )
     }
 }
