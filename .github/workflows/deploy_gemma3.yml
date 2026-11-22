@@ -4,12 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'GitHub Release tag for Gemma 3 (270M)'
+        description: 'Primary GitHub Release tag for Gemma 3 (270M)'
         required: true
+        default: 'ai-v1.0.2'
+      mirror_tags:
+        description: 'Optional comma-separated compatibility tags (e.g. gemma3-v1.0.0)'
+        required: false
         default: 'gemma3-v1.0.0'
+      hf_model_id:
+        description: 'Public HuggingFace Gemma 3 270M repo to convert when model_download_url is empty'
+        required: false
+        default: 'unsloth/gemma-3-270m-it'
       model_download_url:
-        description: 'Direct URL to quantized Gemma 3 270M MediaPipe .task bundle (e.g. HuggingFace resolve URL)'
-        required: true
+        description: 'Optional direct URL to a pre-built MediaPipe .task bundle (leave empty to convert automatically)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -17,31 +26,117 @@ permissions:
 jobs:
   publish-gemma3:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Download Gemma 3 (270M) MediaPipe .task Bundle
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build or Download Gemma 3 (270M) MediaPipe .task Bundle
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MODEL_URL: ${{ github.event.inputs.model_download_url }}
+          HF_MODEL_ID: ${{ github.event.inputs.hf_model_id || 'unsloth/gemma-3-270m-it' }}
         run: |
-          mkdir -p gemma_dist
-          if [ -n "$HF_TOKEN" ]; then
-            curl -fL -H "Authorization: Bearer $HF_TOKEN" "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
+          set -euo pipefail
+          mkdir -p gemma_dist gemma_ckpt gemma_tflite
+
+          if [ -n "$MODEL_URL" ]; then
+            echo "Downloading pre-built Gemma 3 .task bundle..."
+            if [ -n "$HF_TOKEN" ]; then
+              curl -fL -H "Authorization: Bearer $HF_TOKEN" "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
+            else
+              curl -fL "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
+            fi
           else
-            curl -fL "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
+            echo "Converting $HF_MODEL_ID to MediaPipe INT8 .task bundle using litert-torch..."
+
+            python3 -m venv venv_convert
+            venv_convert/bin/pip install --upgrade pip
+            venv_convert/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+              "litert-torch==0.10.0" "huggingface_hub" "safetensors" "absl-py"
+
+            venv_convert/bin/python - <<'PYEOF'
+          import os
+          from huggingface_hub import snapshot_download
+
+          repo_id = os.environ["HF_MODEL_ID"]
+          token = os.environ.get("HF_TOKEN") or None
+          snapshot_download(
+              repo_id=repo_id,
+              local_dir="gemma_ckpt",
+              allow_patterns=[
+                  "*.safetensors",
+                  "*.json",
+                  "tokenizer.model",
+              ],
+              token=token,
+          )
+          print("Downloaded checkpoint files:", sorted(os.listdir("gemma_ckpt")))
+          PYEOF
+
+            venv_convert/bin/python -m litert_torch.generative.examples.gemma3.convert_gemma3_to_tflite \
+              --model_size=270m \
+              --quantize=dynamic_int8 \
+              --checkpoint_path=gemma_ckpt \
+              --output_path=gemma_tflite \
+              --output_name_prefix=gemma3-270m-nabd \
+              --prefill_seq_lens=256 \
+              --kv_cache_max_len=1024 \
+              --mask_as_input=True \
+              --transpose_kv_cache=True
+
+            TFLITE_FILE=$(find gemma_tflite -maxdepth 2 -type f -name "*.tflite" | head -n 1)
+            if [ -z "$TFLITE_FILE" ] || [ ! -f "$TFLITE_FILE" ]; then
+              echo "ERROR: No .tflite output found in gemma_tflite/"
+              ls -la gemma_tflite
+              exit 1
+            fi
+            echo "Converted TFLite model: $TFLITE_FILE"
+            ls -lh "$TFLITE_FILE"
+
+            # Bundle .tflite + tokenizer.model into a single MediaPipe .task file (isolated venv)
+            python3 -m venv venv_bundle
+            venv_bundle/bin/pip install --upgrade pip
+            venv_bundle/bin/pip install "mediapipe==0.10.21" "sentencepiece"
+
+            TFLITE_MODEL="$TFLITE_FILE" venv_bundle/bin/python - <<'PYEOF'
+          import os
+          from mediapipe.tasks.python.genai import bundler
+
+          config = bundler.BundleConfig(
+              tflite_model=os.environ["TFLITE_MODEL"],
+              tokenizer_model="gemma_ckpt/tokenizer.model",
+              start_token="<bos>",
+              stop_tokens=["<eos>", "<end_of_turn>"],
+              output_filename="gemma_dist/gemma3-270m-nabd.task",
+              enable_bytes_to_unicode_mapping=False,
+          )
+          bundler.create_bundle(config)
+          print("Created MediaPipe .task bundle successfully.")
+          PYEOF
           fi
+
           ls -lh gemma_dist/gemma3-270m-nabd.task
+          FILE_SIZE=$(stat -c%s gemma_dist/gemma3-270m-nabd.task)
+          if [ "$FILE_SIZE" -lt 100000000 ]; then
+            echo "ERROR: gemma3-270m-nabd.task unexpectedly small ($FILE_SIZE bytes)"
+            exit 1
+          fi
 
       - name: Generate SHA-256 Manifest & Publish to GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag || 'ai-v1.0.2' }}
+          MIRROR_TAGS: ${{ github.event.inputs.mirror_tags }}
         run: |
           python3 ai_pipeline/publish_gemma3_release.py \
             --model gemma_dist/gemma3-270m-nabd.task \
             --repo "${{ github.repository }}" \
-            --tag "$RELEASE_TAG"
+            --tag "$RELEASE_TAG" \
+            --mirror-tags "$MIRROR_TAGS"

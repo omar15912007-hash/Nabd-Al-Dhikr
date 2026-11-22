@@ -33,7 +33,7 @@ class ModelDownloadManager(
     companion object {
         private const val GITHUB_OWNER = "omar15912007-hash"
         private const val GITHUB_REPO = "Nabd-Al-Dhikr"
-        private const val GEMMA_RELEASE_TAG = "gemma3-v1.0.0"
+        private const val GEMMA_RELEASE_TAG = "ai-v1.0.2"
 
         const val GEMMA_MODEL_FILENAME = "gemma3-270m-nabd.task"
         const val DEFAULT_MANIFEST_URL =

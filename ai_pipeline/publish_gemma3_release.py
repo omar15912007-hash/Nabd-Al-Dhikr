@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_REPO = "omar15912007-hash/Nabd-Al-Dhikr"
-DEFAULT_TAG = "gemma3-v1.0.0"
+DEFAULT_TAG = "ai-v1.0.2"
 DEFAULT_FILENAME = "gemma3-270m-nabd.task"
 
 
@@ -115,9 +115,14 @@ def upload_asset(release: dict[str, Any], path: Path, asset_name: str, token: st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish Gemma 3 (270M) .task model to GitHub Releases.")
-    parser.add_argument("--model", type=Path, help="Path to local gemma3-270m .task bundle (~240MB).")
+    parser.add_argument("--model", type=Path, help="Path to local gemma3-270m .task bundle (~240-290MB).")
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--tag", default=DEFAULT_TAG)
+    parser.add_argument(
+        "--mirror-tags",
+        default="",
+        help="Optional comma-separated extra release tags to mirror the same model + manifest to (e.g. gemma3-v1.0.0).",
+    )
     parser.add_argument("--print-gh-cli", action="store_true")
     args = parser.parse_args()
 
@@ -139,11 +144,18 @@ def main() -> int:
         print("ERROR: Set GITHUB_TOKEN environment variable first.", file=sys.stderr)
         return 1
 
-    manifest_path = build_manifest(args.model, args.repo, args.tag)
-    release = ensure_release(args.repo, args.tag, token)
-    upload_asset(release, args.model, DEFAULT_FILENAME, token)
-    upload_asset(release, manifest_path, "gemma_manifest.json", token)
-    print(f"[DONE] Published Gemma 3 (270M) to https://github.com/{args.repo}/releases/tag/{args.tag}")
+    target_tags: list[str] = [args.tag]
+    for extra in args.mirror_tags.split(","):
+        cleaned = extra.strip()
+        if cleaned and cleaned not in target_tags:
+            target_tags.append(cleaned)
+
+    for tag in target_tags:
+        manifest_path = build_manifest(args.model, args.repo, tag)
+        release = ensure_release(args.repo, tag, token)
+        upload_asset(release, args.model, DEFAULT_FILENAME, token)
+        upload_asset(release, manifest_path, "gemma_manifest.json", token)
+        print(f"[DONE] Published Gemma 3 (270M) to https://github.com/{args.repo}/releases/tag/{tag}")
     return 0
 
 

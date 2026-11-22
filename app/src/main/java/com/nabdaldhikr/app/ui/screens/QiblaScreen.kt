@@ -88,9 +88,11 @@ import java.net.URL
 import java.util.Locale
 import kotlin.math.*
 
-// الإحداثيات الجغرافية الدقيقة لمركز الكعبة المشرفة (مكة المكرمة)
-private const val KAABA_LAT = 21.422487
-private const val KAABA_LON = 39.826206
+private const val QIBLA_PREFS_NAME = "nabd_qibla_cache"
+private const val KEY_LAST_LAT = "last_lat"
+private const val KEY_LAST_LON = "last_lon"
+private const val KEY_LAST_ALT = "last_alt"
+private const val KEY_LAST_CITY = "last_city"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -101,15 +103,33 @@ fun QiblaScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    val qiblaPrefs = remember(context) {
+        context.getSharedPreferences(QIBLA_PREFS_NAME, Context.MODE_PRIVATE)
+    }
 
-    // حالة الموقع الجغرافي الدقيق (بدون عرض قبلة وهمية قبل التقاط الموقع الحقيقي)
-    var userLat by remember { mutableDoubleStateOf(0.0) }
-    var userLon by remember { mutableDoubleStateOf(0.0) }
-    var userAlt by remember { mutableDoubleStateOf(0.0) }
-    var hasValidLocation by remember { mutableStateOf(false) }
+    // استرجاع آخر موقع حقيقي محفوظ فوراً (مفيد داخل المساجد أو بدون إنترنت، ويُحدّث تلقائياً فور التقاط GPS)
+    val cachedLat = remember(qiblaPrefs) {
+        if (qiblaPrefs.contains(KEY_LAST_LAT)) java.lang.Double.longBitsToDouble(qiblaPrefs.getLong(KEY_LAST_LAT, 0L)) else Double.NaN
+    }
+    val cachedLon = remember(qiblaPrefs) {
+        if (qiblaPrefs.contains(KEY_LAST_LON)) java.lang.Double.longBitsToDouble(qiblaPrefs.getLong(KEY_LAST_LON, 0L)) else Double.NaN
+    }
+    val cachedAlt = remember(qiblaPrefs) {
+        if (qiblaPrefs.contains(KEY_LAST_ALT)) java.lang.Double.longBitsToDouble(qiblaPrefs.getLong(KEY_LAST_ALT, 0L)) else 0.0
+    }
+    val cachedCity = remember(qiblaPrefs) { qiblaPrefs.getString(KEY_LAST_CITY, null) }
+    val hasCachedCoords = !cachedLat.isNaN() && !cachedLon.isNaN()
+
+    // حالة الموقع الجغرافي الدقيق (بدون عرض قبلة وهمية قبل التقاط موقع حقيقي)
+    var userLat by remember { mutableDoubleStateOf(if (hasCachedCoords) cachedLat else 0.0) }
+    var userLon by remember { mutableDoubleStateOf(if (hasCachedCoords) cachedLon else 0.0) }
+    var userAlt by remember { mutableDoubleStateOf(if (hasCachedCoords) cachedAlt else 0.0) }
+    var hasValidLocation by remember { mutableStateOf(hasCachedCoords) }
     var accuracyMeters by remember { mutableFloatStateOf(0f) }
-    var locationSource by remember { mutableStateOf("جاري تحديد موقعك الدقيق...") }
-    var cityName by remember { mutableStateOf("تحديد الموقع...") }
+    var locationSource by remember {
+        mutableStateOf(if (hasCachedCoords) "آخر موقع محفوظ (جاري التحديث...)" else "جاري تحديد موقعك الدقيق...")
+    }
+    var cityName by remember { mutableStateOf(cachedCity ?: "تحديد الموقع...") }
     var isGpsEnabled by remember { mutableStateOf(true) }
     var hasLocationPermission by remember {
         mutableStateOf(
@@ -194,6 +214,7 @@ fun QiblaScreen(
                     val country = addr.countryName ?: ""
                     val label = listOf(locality, country).filter { it.isNotBlank() }.joinToString("، ")
                     if (label.isNotBlank()) {
+                        qiblaPrefs.edit().putString(KEY_LAST_CITY, label).apply()
                         withContext(Dispatchers.Main) { cityName = label }
                         return@launch
                     }
@@ -251,6 +272,11 @@ fun QiblaScreen(
         hasValidLocation = true
         accuracyMeters = loc.accuracy
         locationSource = "$labelPrefix (±${loc.accuracy.roundToInt()} م)"
+        qiblaPrefs.edit()
+            .putLong(KEY_LAST_LAT, java.lang.Double.doubleToRawLongBits(loc.latitude))
+            .putLong(KEY_LAST_LON, java.lang.Double.doubleToRawLongBits(loc.longitude))
+            .putLong(KEY_LAST_ALT, java.lang.Double.doubleToRawLongBits(loc.altitude))
+            .apply()
         if (cityName == "تحديد الموقع...") {
             cityName = String.format(Locale.US, "%.4f°, %.4f°", userLat, userLon)
         }
@@ -315,9 +341,18 @@ fun QiblaScreen(
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
-        hasLocationPermission = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+        if (perms.containsKey(Manifest.permission.ACCESS_FINE_LOCATION) ||
+            perms.containsKey(Manifest.permission.ACCESS_COARSE_LOCATION)
+        ) {
+            hasLocationPermission = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
                 perms[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        refreshLocation()
+            refreshLocation()
+        }
+        if (perms.containsKey(Manifest.permission.CAMERA)) {
+            val camGranted = perms[Manifest.permission.CAMERA] == true
+            hasCameraPermission = camGranted
+            if (camGranted) isArMode = true
+        }
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
@@ -327,20 +362,22 @@ fun QiblaScreen(
         if (granted) isArMode = true
     }
 
-    // طلب صلاحية الموقع (والكاميرا للواقع المعزز) عند فتح الشاشة لأول مرة
+    // طلب الصلاحيات دفعة واحدة عند فتح الشاشة (الموقع + الكاميرا) لمنع إلغاء أندرويد للطلب الثاني
     LaunchedEffect(Unit) {
-        if (!hasLocationPermission) {
-            locationPermissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                )
-            )
-        } else {
+        val missingPermissions = buildList {
+            if (!hasLocationPermission) {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+                add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            }
+            if (!hasCameraPermission) {
+                add(Manifest.permission.CAMERA)
+            }
+        }
+        if (hasLocationPermission) {
             refreshLocation()
         }
-        if (!hasCameraPermission) {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        if (missingPermissions.isNotEmpty()) {
+            locationPermissionLauncher.launch(missingPermissions.toTypedArray())
         }
     }
 
@@ -403,6 +440,9 @@ fun QiblaScreen(
                 var matrixReady = false
                 when (event.sensor.type) {
                     Sensor.TYPE_ROTATION_VECTOR -> {
+                        if (event.accuracy != SensorManager.SENSOR_STATUS_NO_CONTACT) {
+                            sensorAccuracy = event.accuracy
+                        }
                         SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
                         matrixReady = true
                     }
@@ -411,6 +451,9 @@ fun QiblaScreen(
                         hasGravity = true
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
+                        if (event.accuracy != SensorManager.SENSOR_STATUS_NO_CONTACT) {
+                            sensorAccuracy = event.accuracy
+                        }
                         // كشف فوري للتداخل المغناطيسي (معادن أو مغناطيس جراب الهاتف)
                         val bx = event.values[0]
                         val by = event.values[1]
@@ -811,7 +854,7 @@ fun QiblaScreen(
                         ) {
                             QiblaStatItem(
                                 label = "زاوية القبلة",
-                                value = "${qiblaBearing.roundToInt()}°",
+                                value = if (hasValidLocation) "${qiblaBearing.roundToInt()}°" else "--°",
                                 valueColor = PrimaryGold
                             )
                             Box(
@@ -822,7 +865,7 @@ fun QiblaScreen(
                             )
                             QiblaStatItem(
                                 label = "اتجاهك الحالي",
-                                value = "${smoothAzimuth.roundToInt()}°",
+                                value = if (hasAzimuthFix) "${smoothAzimuth.roundToInt()}°" else "--°",
                                 valueColor = activeAccentColor
                             )
                             Box(
@@ -833,7 +876,7 @@ fun QiblaScreen(
                             )
                             QiblaStatItem(
                                 label = "المسافة للكعبة",
-                                value = "${String.format(Locale.US, "%,d", distanceKm.roundToInt())} كم",
+                                value = if (hasValidLocation) "${String.format(Locale.US, "%,d", distanceKm.roundToInt())} كم" else "-- كم",
                                 valueColor = TextPrimary
                             )
                         }
@@ -1417,8 +1460,12 @@ private fun CameraPreviewSurface(
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraHolder = remember { arrayOfNulls<CameraDevice>(1) }
     val sessionHolder = remember { arrayOfNulls<CameraCaptureSession>(1) }
+    val textureViewHolder = remember { arrayOfNulls<TextureView>(1) }
+    val previewSizeHolder = remember { intArrayOf(1280, 720) }
+    val isOpeningHolder = remember { booleanArrayOf(false) }
 
     fun closeCameraSafely() {
+        isOpeningHolder[0] = false
         try {
             sessionHolder[0]?.close()
         } catch (_: Exception) {}
@@ -1429,10 +1476,39 @@ private fun CameraPreviewSurface(
         cameraHolder[0] = null
     }
 
+    fun startCameraIfReady(tv: TextureView) {
+        if (cameraHolder[0] != null || isOpeningHolder[0]) return
+        val surface = tv.surfaceTexture ?: return
+        if (!tv.isAvailable || tv.width <= 0 || tv.height <= 0) return
+        isOpeningHolder[0] = true
+        openRearCamera(
+            context = context,
+            textureView = tv,
+            surfaceTexture = surface,
+            viewWidth = tv.width,
+            viewHeight = tv.height,
+            onPreviewSizeChosen = { pw, ph ->
+                previewSizeHolder[0] = pw
+                previewSizeHolder[1] = ph
+            },
+            onFovMeasured = onHorizontalFovMeasured
+        ) { cam, session ->
+            isOpeningHolder[0] = false
+            cameraHolder[0] = cam
+            sessionHolder[0] = session
+        }
+    }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                closeCameraSafely()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    textureViewHolder[0]?.let { startCameraIfReady(it) }
+                }
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
+                    closeCameraSafely()
+                }
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1446,22 +1522,21 @@ private fun CameraPreviewSurface(
         modifier = modifier,
         factory = { ctx ->
             TextureView(ctx).apply {
+                textureViewHolder[0] = this
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                        openRearCamera(
-                            context = ctx,
-                            textureView = this@apply,
-                            surfaceTexture = surface,
-                            viewWidth = width,
-                            viewHeight = height,
-                            onFovMeasured = onHorizontalFovMeasured
-                        ) { cam, session ->
-                            cameraHolder[0] = cam
-                            sessionHolder[0] = session
-                        }
+                        startCameraIfReady(this@apply)
                     }
 
-                    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
+                    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                        applyCenterCropTransform(
+                            textureView = this@apply,
+                            previewW = previewSizeHolder[0],
+                            previewH = previewSizeHolder[1],
+                            viewWidth = width,
+                            viewHeight = height
+                        )
+                    }
 
                     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
                         closeCameraSafely()
@@ -1475,6 +1550,26 @@ private fun CameraPreviewSurface(
     )
 }
 
+private fun applyCenterCropTransform(
+    textureView: TextureView,
+    previewW: Int,
+    previewH: Int,
+    viewWidth: Int,
+    viewHeight: Int
+): Float {
+    if (viewWidth <= 0 || viewHeight <= 0 || previewW <= 0 || previewH <= 0) return 1f
+    val matrix = Matrix()
+    val centerX = viewWidth / 2f
+    val centerY = viewHeight / 2f
+    val bufferAspect = previewH.toFloat() / previewW.toFloat()
+    val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+    val scaleX = if (bufferAspect > viewAspect) bufferAspect / viewAspect else 1f
+    val scaleY = if (bufferAspect < viewAspect) viewAspect / bufferAspect else 1f
+    matrix.setScale(scaleX, scaleY, centerX, centerY)
+    textureView.setTransform(matrix)
+    return scaleX
+}
+
 @SuppressLint("MissingPermission")
 private fun openRearCamera(
     context: Context,
@@ -1482,6 +1577,7 @@ private fun openRearCamera(
     surfaceTexture: SurfaceTexture,
     viewWidth: Int,
     viewHeight: Int,
+    onPreviewSizeChosen: (Int, Int) -> Unit,
     onFovMeasured: (Float) -> Unit,
     onOpened: (CameraDevice?, CameraCaptureSession?) -> Unit
 ) {
@@ -1490,21 +1586,12 @@ private fun openRearCamera(
         val cameraId = manager.cameraIdList.firstOrNull { id ->
             val chars = manager.getCameraCharacteristics(id)
             chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
-        } ?: manager.cameraIdList.firstOrNull() ?: return
+        } ?: manager.cameraIdList.firstOrNull() ?: run {
+            onOpened(null, null)
+            return
+        }
 
         val chars = manager.getCameraCharacteristics(cameraId)
-
-        // حساب مجال الرؤية البصري الحقيقي للعدسة في الوضع العمودي (Portrait Horizontal FOV)
-        val sensorSize = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-        val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-        val focalLength = focalLengths?.firstOrNull()
-        if (sensorSize != null && focalLength != null && focalLength > 0f) {
-            // في الوضع العمودي: العرض الأفقي للشاشة يقابل البعد الأصغر للمستشعر
-            val portraitSensorWidth = min(sensorSize.width, sensorSize.height).toDouble()
-            val fovRad = 2.0 * atan(portraitSensorWidth / (2.0 * focalLength.toDouble()))
-            val fovDeg = Math.toDegrees(fovRad).toFloat().coerceIn(42f, 75f)
-            onFovMeasured(fovDeg)
-        }
 
         // اختيار أنسب دقة معاينة مدعومة وتطبيق مصفوفة Center-Crop لمنع أي مطّ للصورة
         val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -1516,19 +1603,27 @@ private fun openRearCamera(
 
         val previewW = chosenSize?.width ?: 1280
         val previewH = chosenSize?.height ?: 720
+        onPreviewSizeChosen(previewW, previewH)
         surfaceTexture.setDefaultBufferSize(previewW, previewH)
 
-        if (viewWidth > 0 && viewHeight > 0) {
-            val matrix = Matrix()
-            val centerX = viewWidth / 2f
-            val centerY = viewHeight / 2f
-            // الحساس في أندرويد غالباً بزاوية 90° (عرضه أكبر من ارتفاعه) بينما الشاشة عمودية
-            val bufferAspect = previewH.toFloat() / previewW.toFloat() // width/height after 90° rotation
-            val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
-            val scaleX = if (bufferAspect > viewAspect) bufferAspect / viewAspect else 1f
-            val scaleY = if (bufferAspect < viewAspect) viewAspect / bufferAspect else 1f
-            matrix.setScale(scaleX, scaleY, centerX, centerY)
-            textureView.setTransform(matrix)
+        val cropScaleX = applyCenterCropTransform(
+            textureView = textureView,
+            previewW = previewW,
+            previewH = previewH,
+            viewWidth = viewWidth,
+            viewHeight = viewHeight
+        )
+
+        // حساب مجال الرؤية البصري الحقيقي للعدسة بعد Center-Crop حتى تتطابق الكعبة مع الأفق بدقة
+        val sensorSize = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+        val focalLength = focalLengths?.firstOrNull()
+        if (sensorSize != null && focalLength != null && focalLength > 0f) {
+            val portraitSensorWidth = min(sensorSize.width, sensorSize.height).toDouble()
+            val rawHalfTan = portraitSensorWidth / (2.0 * focalLength.toDouble())
+            val effectiveFovRad = 2.0 * atan(rawHalfTan / cropScaleX.coerceAtLeast(1f).toDouble())
+            val fovDeg = Math.toDegrees(effectiveFovRad).toFloat().coerceIn(38f, 75f)
+            onFovMeasured(fovDeg)
         }
 
         val previewSurface = Surface(surfaceTexture)
@@ -1549,26 +1644,35 @@ private fun openRearCamera(
                                 try {
                                     session.setRepeatingRequest(requestBuilder.build(), null, mainHandler)
                                     onOpened(camera, session)
-                                } catch (_: Exception) {}
+                                } catch (_: Exception) {
+                                    onOpened(camera, null)
+                                }
                             }
-                            override fun onConfigureFailed(session: CameraCaptureSession) {}
+                            override fun onConfigureFailed(session: CameraCaptureSession) {
+                                onOpened(camera, null)
+                            }
                         },
                         mainHandler
                     )
                 } catch (_: Exception) {
                     camera.close()
+                    onOpened(null, null)
                 }
             }
 
             override fun onDisconnected(camera: CameraDevice) {
                 camera.close()
+                onOpened(null, null)
             }
 
             override fun onError(camera: CameraDevice, error: Int) {
                 camera.close()
+                onOpened(null, null)
             }
         }, mainHandler)
-    } catch (_: Exception) {}
+    } catch (_: Exception) {
+        onOpened(null, null)
+    }
 }
 
 private fun lowPassFilter(input: FloatArray, output: FloatArray, alpha: Float) {

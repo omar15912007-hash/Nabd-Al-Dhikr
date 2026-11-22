@@ -7,6 +7,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 class OfflineAiEngineTest {
@@ -210,23 +212,151 @@ class OfflineAiEngineTest {
         assertEquals(0f, QiblaMathUtils.extractHorizontalHeading(tilted45North, isCameraMode = true), 0.01f)
     }
 
+    /**
+     * Builds exact Android ENU 3x3 rotation matrix R = Rz(-heading) * Rx(pitch) * Ry(roll)
+     * where heading=0° is North, pitch=0° is flat face-up, pitch=90° is upright portrait,
+     * pitch=-45° is top tilted downward, pitch=115° is camera tilted skyward past vertical.
+     */
+    private fun buildEnuRotationMatrix(headingDeg: Double, pitchDeg: Double, rollDeg: Double): FloatArray {
+        val h = Math.toRadians(headingDeg)
+        val p = Math.toRadians(pitchDeg)
+        val r = Math.toRadians(rollDeg)
+
+        val ch = cos(-h); val sh = sin(-h)
+        val cp = cos(p); val sp = sin(p)
+        val cr = cos(r); val sr = sin(r)
+
+        // Rz(-h)
+        val rz = doubleArrayOf(
+            ch, -sh, 0.0,
+            sh, ch, 0.0,
+            0.0, 0.0, 1.0
+        )
+        // Rx(p)
+        val rx = doubleArrayOf(
+            1.0, 0.0, 0.0,
+            0.0, cp, -sp,
+            0.0, sp, cp
+        )
+        // Ry(r)
+        val ry = doubleArrayOf(
+            cr, 0.0, sr,
+            0.0, 1.0, 0.0,
+            -sr, 0.0, cr
+        )
+
+        fun mul(a: DoubleArray, b: DoubleArray): DoubleArray {
+            val out = DoubleArray(9)
+            for (row in 0..2) {
+                for (col in 0..2) {
+                    out[row * 3 + col] =
+                        a[row * 3 + 0] * b[0 * 3 + col] +
+                        a[row * 3 + 1] * b[1 * 3 + col] +
+                        a[row * 3 + 2] * b[2 * 3 + col]
+                }
+            }
+            return out
+        }
+
+        val combined = mul(mul(rz, rx), ry)
+        return FloatArray(9) { combined[it].toFloat() }
+    }
+
     @Test
-    fun qiblaMath_greatCircleBearingAccurateAcrossGlobalCities() {
-        // Cairo -> Makkah (~136.1°)
+    fun qiblaMath_exhaustive3dSweepAcrossAllHeadingsPitchesAndRollsHasZeroFlipError() {
+        val headings = listOf(0.0, 45.0, 90.0, 136.1, 180.0, 244.4, 270.0, 359.0)
+        val handheldPitches = listOf(-45.0, -30.0, 0.0, 30.0, 45.0, 60.0)
+        val uprightPitches = listOf(75.0, 90.0, 105.0, 115.0)
+        val rolls = listOf(-25.0, 0.0, 25.0)
+
+        // 1. Handheld / Flat Compass mode (including downward tilt -45° + bank roll ±25°): < 0.05° error everywhere
+        for (heading in headings) {
+            for (pitch in handheldPitches) {
+                for (roll in rolls) {
+                    val rot = buildEnuRotationMatrix(heading, pitch, roll)
+                    val measured = QiblaMathUtils.extractHorizontalHeading(rot, isCameraMode = false)
+                    val err = abs(QiblaMathUtils.calculateShortestAngleDelta(heading.toFloat(), measured))
+                    assertTrue(
+                        "Handheld Compass error too high at heading=$heading pitch=$pitch roll=$roll: measured=$measured err=$err",
+                        err < 0.05f
+                    )
+                }
+            }
+        }
+
+        // 2. Upright / Sky-tilted Compass & AR Camera modes (including steering-wheel screen roll ±35° around lens Z): < 0.05° error
+        for (heading in headings) {
+            for (pitch in uprightPitches) {
+                val baseRot = buildEnuRotationMatrix(heading, pitch, 0.0)
+                for (screenRollDeg in listOf(-35.0, 0.0, 35.0)) {
+                    val sr = Math.toRadians(screenRollDeg)
+                    val cs = cos(sr).toFloat(); val ss = sin(sr).toFloat()
+                    // Multiply baseRot * Rz_device(screenRoll): rotates phone screen around optical axis (-Z)
+                    val rot = FloatArray(9)
+                    for (row in 0..2) {
+                        rot[row * 3 + 0] = baseRot[row * 3 + 0] * cs + baseRot[row * 3 + 1] * ss
+                        rot[row * 3 + 1] = -baseRot[row * 3 + 0] * ss + baseRot[row * 3 + 1] * cs
+                        rot[row * 3 + 2] = baseRot[row * 3 + 2]
+                    }
+                    val arMeasured = QiblaMathUtils.extractHorizontalHeading(rot, isCameraMode = true)
+                    val compassMeasured = QiblaMathUtils.extractHorizontalHeading(rot, isCameraMode = false)
+                    val arErr = abs(QiblaMathUtils.calculateShortestAngleDelta(heading.toFloat(), arMeasured))
+                    val compErr = abs(QiblaMathUtils.calculateShortestAngleDelta(heading.toFloat(), compassMeasured))
+                    assertTrue(
+                        "AR Camera error at heading=$heading pitch=$pitch screenRoll=$screenRollDeg: err=$arErr",
+                        arErr < 0.05f
+                    )
+                    assertTrue(
+                        "Upright Compass error at heading=$heading pitch=$pitch screenRoll=$screenRollDeg: err=$compErr",
+                        compErr < 0.05f
+                    )
+                }
+            }
+        }
+
+        // 3. Ceiling (pitch=180°) & Floor (pitch=0°) AR fallback must stay aligned to North with ZERO 180° flip
+        assertEquals(0f, QiblaMathUtils.extractHorizontalHeading(buildEnuRotationMatrix(0.0, 0.0, 0.0), isCameraMode = true), 0.05f)
+        assertEquals(0f, QiblaMathUtils.extractHorizontalHeading(buildEnuRotationMatrix(0.0, 180.0, 0.0), isCameraMode = true), 0.05f)
+
+        // 4. Camera elevation check: upright (90°)=0° horizon, tilted up (120°)=+30° sky, tilted down (60°)=-30° floor
+        assertEquals(0f, QiblaMathUtils.extractCameraElevationDegrees(buildEnuRotationMatrix(136.1, 90.0, 0.0)), 0.05f)
+        assertEquals(30f, QiblaMathUtils.extractCameraElevationDegrees(buildEnuRotationMatrix(136.1, 120.0, 0.0)), 0.05f)
+        assertEquals(-30f, QiblaMathUtils.extractCameraElevationDegrees(buildEnuRotationMatrix(136.1, 60.0, 0.0)), 0.05f)
+    }
+
+    @Test
+    fun qiblaMath_greatCircleBearingDistancesContinuityAndReleaseTagVerified() {
+        // Cairo -> Makkah (~136.1°, ~1286 km)
         val cairo = QiblaMathUtils.calculateQiblaBearing(30.0444, 31.2357)
+        val cairoDist = QiblaMathUtils.calculateDistanceToKaabaKm(30.0444, 31.2357)
         assertTrue("Cairo Qibla should be ~136° but got $cairo", abs(cairo - 136.1f) < 1.0f)
+        assertTrue("Cairo distance should be ~1286 km but got $cairoDist", abs(cairoDist - 1286.0) < 15.0)
 
-        // Riyadh -> Makkah (~244.4°)
+        // Riyadh -> Makkah (~244.4°, ~793 km)
         val riyadh = QiblaMathUtils.calculateQiblaBearing(24.7136, 46.6753)
+        val riyadhDist = QiblaMathUtils.calculateDistanceToKaabaKm(24.7136, 46.6753)
         assertTrue("Riyadh Qibla should be ~244.4° but got $riyadh", abs(riyadh - 244.4f) < 1.0f)
+        assertTrue("Riyadh distance should be ~793 km but got $riyadhDist", abs(riyadhDist - 793.0) < 15.0)
 
-        // London -> Makkah (~119.0°)
-        val london = QiblaMathUtils.calculateQiblaBearing(51.5074, -0.1278)
-        assertTrue("London Qibla should be ~119.0° but got $london", abs(london - 119.0f) < 1.0f)
+        // London -> Makkah (~119.0°), New York (~58.5°), Jakarta (~295.1°), Tokyo (~293.0°)
+        assertTrue(abs(QiblaMathUtils.calculateQiblaBearing(51.5074, -0.1278) - 119.0f) < 1.0f)
+        assertTrue(abs(QiblaMathUtils.calculateQiblaBearing(40.7128, -74.0060) - 58.5f) < 1.0f)
+        assertTrue(abs(QiblaMathUtils.calculateQiblaBearing(-6.2088, 106.8456) - 295.1f) < 1.0f)
+        assertTrue(abs(QiblaMathUtils.calculateQiblaBearing(35.6762, 139.6503) - 293.0f) < 1.0f)
+
+        // Shortest delta wrap-around and alignment lock (±2.5°)
+        assertEquals(2f, QiblaMathUtils.calculateShortestAngleDelta(359f, 1f), 0.01f)
+        assertEquals(-2f, QiblaMathUtils.calculateShortestAngleDelta(1f, 359f), 0.01f)
+        assertTrue(QiblaMathUtils.isAlignedWithQibla(134.0f, 136.1f, toleranceDegrees = 2.5f))
+        assertFalse(QiblaMathUtils.isAlignedWithQibla(133.0f, 136.1f, toleranceDegrees = 2.5f))
 
         // Magnetic field interference detector
         assertFalse(QiblaMathUtils.isMagneticFieldInterfered(45f))
         assertTrue(QiblaMathUtils.isMagneticFieldInterfered(120f))
         assertTrue(QiblaMathUtils.isMagneticFieldInterfered(10f))
+
+        // Verify Gemma 3 release tag targets ai-v1.0.2
+        assertTrue(ModelDownloadManager.DEFAULT_MANIFEST_URL.contains("/ai-v1.0.2/"))
+        assertTrue(ModelDownloadManager.DEFAULT_DIRECT_MODEL_URL.contains("/ai-v1.0.2/"))
     }
 }

@@ -213,6 +213,11 @@ object QiblaMathUtils {
     ): Float {
         if (rotationMatrix.size < 9) return 0f
 
+        // في إحداثيات أندرويد العالمية ENU (V_world = R * V_device):
+        // - الحافة العلوية للهاتف (+Y_device) في المستوى الأفقي = (R[1], R[4])
+        // - المحور البصري للعدسة الخلفية (-Z_device) في المستوى الأفقي = (-R[2], -R[5])
+        // - R[8] = (+Z_device)·Up (موجب عندما تكون الشاشة للأعلى، ≈0 عند الوقوف العمودي، سالب عند الإمالة للسماء)
+        // - R[7] = (+Y_device)·Up (موجب عندما تكون الحافة العلوية للأعلى)
         val topEast = rotationMatrix[1].toDouble()
         val topNorth = rotationMatrix[4].toDouble()
         val camEast = -rotationMatrix[2].toDouble()
@@ -220,27 +225,47 @@ object QiblaMathUtils {
 
         val hTop = hypot(topEast, topNorth)
         val hCam = hypot(camEast, camNorth)
+        val screenUp = rotationMatrix[8].toDouble()
+        val topUp = rotationMatrix[7].toDouble()
 
         val east: Double
         val north: Double
 
         if (isCameraMode) {
             // في وضع الكاميرا (AR): نعتمد مباشرةً على المحور البصري للعدسة الخلفية (-Z_device)
-            // ولا ننتقل إلى (+Y_device) إلا إذا وجّه المستخدم الكاميرا عمودياً تماماً للسقف أو الأرض
+            // وإذا وُجهت العدسة عمودياً تماماً للأرض (screenUp > 0) نستخدم (+Y)، أو للسقف (screenUp < 0) نستخدم (-Y)
             if (hCam >= 0.15) {
                 east = camEast
                 north = camNorth
+            } else if (hTop >= 0.15) {
+                val sign = if (screenUp >= 0.0) 1.0 else -1.0
+                east = sign * topEast
+                north = sign * topNorth
             } else {
-                east = topEast
-                north = topNorth
+                east = -rotationMatrix[3].toDouble()
+                north = rotationMatrix[0].toDouble()
             }
         } else {
-            // في وضع البوصلة: دمج متجهي سلس بين الحافة العلوية (+Y) والكاميرا الأمامية (-Z)
-            // يمنع تماماً أي انقلاب 180° عند رفع الهاتف من الوضع الأفقي إلى العمودي
-            val totalWeight = hTop + hCam
-            if (totalWeight < 1e-6) return 0f
-            east = (hTop * topEast + hCam * camEast) / totalWeight
-            north = (hTop * topNorth + hCam * camNorth) / totalWeight
+            // في وضع البوصلة:
+            // - عندما تكون الشاشة مسطحة أو مائلة باليد حتى ~68° (screenUp >= 0.35): نستخدم الحافة العلوية (+Y)
+            //   لتجنب أي انحراف ناتج عن إمالة الهاتف جانبياً (Roll) مع دقة 0.00° عبر كامل النطاق [-68°..+68°].
+            // - وعند رفع الهاتف عمودياً أو إمالته للسماء (screenUp < 0.35): ننتقل بسلاسة تامة بدون أي قفزة
+            //   إلى المحور البصري الأمامي (-Z_device) مع دقة 0.00° ضد دوران الشاشة الجانبي.
+            if (screenUp >= 0.35 && hTop >= 0.15) {
+                east = topEast
+                north = topNorth
+            } else if (topUp >= 0.0 && hCam >= 0.15) {
+                east = camEast
+                north = camNorth
+            } else if (hTop >= 0.15) {
+                east = topEast
+                north = topNorth
+            } else if (hCam >= 0.15) {
+                east = camEast
+                north = camNorth
+            } else {
+                return 0f
+            }
         }
 
         val azimuthDeg = Math.toDegrees(atan2(east, north))
