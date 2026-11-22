@@ -59,7 +59,7 @@ jobs:
             python3 -m venv venv_convert
             venv_convert/bin/pip install --upgrade pip
             venv_convert/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-              "litert-torch==0.10.0" "huggingface_hub" "safetensors" "absl-py"
+              "litert-torch==0.10.0" "tensorflow-cpu" "huggingface_hub" "safetensors" "absl-py"
 
             venv_convert/bin/python - <<'PYEOF'
           import os
