@@ -23,6 +23,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // Gemma 3 (270M) requires 64-bit arm64-v8a; strip unused 8.3MB 32-bit LLM native library
+            excludes += listOf("**/armeabi-v7a/libllm_inference_engine_jni.so")
         }
     }
 
@@ -89,8 +91,8 @@ dependencies {
     // Lifecycle Runtime Compose
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
-    // Offline AI Engine (ONNX Runtime Android with ARM NEON acceleration) & Resumable Downloader (OkHttp)
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
+    // On-device Gemma 3 (270M) LLM Inference (MediaPipe GenAI) & Free Dorar.net / GitHub Releases HTTP (OkHttp)
+    implementation("com.google.mediapipe:tasks-genai:0.10.35")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     debugImplementation(libs.androidx.ui.tooling)

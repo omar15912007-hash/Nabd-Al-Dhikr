@@ -1,0 +1,47 @@
+name: Publish Gemma 3 (270M) Model to GitHub Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'GitHub Release tag for Gemma 3 (270M)'
+        required: true
+        default: 'gemma3-v1.0.0'
+      model_download_url:
+        description: 'Direct URL to quantized Gemma 3 270M MediaPipe .task bundle (e.g. HuggingFace resolve URL)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish-gemma3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Gemma 3 (270M) MediaPipe .task Bundle
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MODEL_URL: ${{ github.event.inputs.model_download_url }}
+        run: |
+          mkdir -p gemma_dist
+          if [ -n "$HF_TOKEN" ]; then
+            curl -fL -H "Authorization: Bearer $HF_TOKEN" "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
+          else
+            curl -fL "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
+          fi
+          ls -lh gemma_dist/gemma3-270m-nabd.task
+
+      - name: Generate SHA-256 Manifest & Publish to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          python3 ai_pipeline/publish_gemma3_release.py \
+            --model gemma_dist/gemma3-270m-nabd.task \
+            --repo "${{ github.repository }}" \
+            --tag "$RELEASE_TAG"

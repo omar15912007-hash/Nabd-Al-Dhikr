@@ -24,7 +24,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.nabdaldhikr.app.ai.*
+import com.nabdaldhikr.app.ai.DeviceCapabilityStatus
+import com.nabdaldhikr.app.ai.GemmaDownloadState
 import com.nabdaldhikr.app.data.model.Azkar
 import com.nabdaldhikr.app.data.model.AzkarCategory
 import com.nabdaldhikr.app.ui.theme.*
@@ -38,15 +39,16 @@ fun DhikrAiBottomSheet(
     azkar: Azkar,
     allCategories: List<AzkarCategory>,
     aiViewModel: AiAssistantViewModel,
-    onOpenModelManager: () -> Unit,
+    onOpenNabdAiChat: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val metadataMap by aiViewModel.offlineMetadata.collectAsState()
-    val isNeuralReady by aiViewModel.isNeuralModelReady.collectAsState()
+    val isGemmaInstalled by aiViewModel.isGemmaInstalled.collectAsState()
     val capability by aiViewModel.capabilityReport.collectAsState()
     val downloadState by aiViewModel.downloadState.collectAsState()
     val sheetAnswer by aiViewModel.sheetAnswer.collectAsState()
+    val sheetSourceBadge by aiViewModel.sheetSourceBadge.collectAsState()
     val answerLatencyMs by aiViewModel.sheetAnswerLatencyMs.collectAsState()
 
     val metadata = remember(metadataMap, categoryId, azkar.id) {
@@ -76,7 +78,6 @@ fun DhikrAiBottomSheet(
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -96,23 +97,23 @@ fun DhikrAiBottomSheet(
                     ) {
                         Icon(
                             imageVector = AppIcons.AutoAwesome,
-                            contentDescription = "المساعد الذكي",
+                            contentDescription = "نبض AI",
                             tint = PrimaryGold,
                             modifier = Modifier.size(20.dp)
                         )
                     }
                     Column {
                         Text(
-                            text = "مساعد نبض الذكر الذكي ✨",
+                            text = "نبض AI • شرح الذكر ✨",
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
                             color = PrimaryGold
                         )
                         Text(
-                            text = if (isNeuralReady) {
-                                "يعمل بنموذج ONNX المحلي بدون إنترنت"
+                            text = if (isGemmaInstalled) {
+                                "Gemma 3 (270M) + الدرر السنية • بدون فتاوى"
                             } else {
-                                "الوضع المحلي الفوري • بدون فتاوى"
+                                "شرح محلي فوري بدون إنترنت • بدون فتاوى"
                             },
                             fontSize = 11.sp,
                             color = TextSecondary
@@ -121,17 +122,12 @@ fun DhikrAiBottomSheet(
                 }
 
                 IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Filled.Close,
-                        contentDescription = "إغلاق",
-                        tint = TextSecondary
-                    )
+                    Icon(Icons.Filled.Close, contentDescription = "إغلاق", tint = TextSecondary)
                 }
             }
 
             HorizontalDivider(color = PrimaryGold.copy(alpha = 0.2f))
 
-            // 1. Simplified Explanation
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -156,7 +152,6 @@ fun DhikrAiBottomSheet(
                 }
             }
 
-            // 2. Word Meanings (Vocabulary)
             val vocabulary = metadata?.vocabulary.orEmpty()
             if (vocabulary.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -203,7 +198,6 @@ fun DhikrAiBottomSheet(
                 }
             }
 
-            // 3. Clickable Suggested Follow-ups Chips (< 6 words each)
             val followups = metadata?.suggestedFollowups?.takeIf { it.isNotEmpty() }
                 ?: listOf("ما فضل هذا الذكر؟", "كم مرة يُقال؟", "ما مصدر هذا الذكر؟")
 
@@ -214,9 +208,7 @@ fun DhikrAiBottomSheet(
                     fontWeight = FontWeight.Bold,
                     color = PrimaryGold
                 )
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(followups) { chipQuestion ->
                         SuggestionChip(
                             onClick = {
@@ -236,9 +228,7 @@ fun DhikrAiBottomSheet(
                                     fontWeight = FontWeight.Medium
                                 )
                             },
-                            colors = SuggestionChipDefaults.suggestionChipColors(
-                                containerColor = AiChipBg
-                            ),
+                            colors = SuggestionChipDefaults.suggestionChipColors(containerColor = AiChipBg),
                             border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.45f)),
                             shape = RoundedCornerShape(20.dp)
                         )
@@ -246,7 +236,6 @@ fun DhikrAiBottomSheet(
                 }
             }
 
-            // 4. Interactive Answer Box
             AnimatedVisibility(visible = !sheetAnswer.isNullOrBlank()) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -254,44 +243,44 @@ fun DhikrAiBottomSheet(
                     colors = CardDefaults.cardColors(containerColor = HeaderBg),
                     border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.5f))
                 ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "إجابة المساعد",
-                                color = PrimaryGold,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
+                            Text("إجابة نبض AI", color = PrimaryGold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                             if (answerLatencyMs > 0L) {
-                                Text(
-                                    text = "${answerLatencyMs}ms",
-                                    color = TextSecondary,
-                                    fontSize = 11.sp
-                                )
+                                Text("${answerLatencyMs}ms", color = TextSecondary, fontSize = 11.sp)
                             }
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = sheetAnswer.orEmpty(),
                             color = TextPrimary,
                             fontSize = 13.5.sp,
                             lineHeight = 21.sp
                         )
+                        if (!sheetSourceBadge.isNullOrBlank()) {
+                            Text(
+                                text = sheetSourceBadge.orEmpty(),
+                                color = CompletedGreen,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
 
-            // 5. Free-text question input (guarded against fatwas + 0.65 similarity gate)
             OutlinedTextField(
                 value = customQuestion,
                 onValueChange = { customQuestion = it },
                 placeholder = {
                     Text(
-                        text = "اسأل عن معنى كلمة أو فضل أو توقيت الذكر...",
+                        text = "اسأل عن معنى كلمة أو فضل الذكر...",
                         color = TextSecondary,
                         fontSize = 13.sp
                     )
@@ -332,59 +321,40 @@ fun DhikrAiBottomSheet(
                 )
             )
 
-            // 6. Optional Offline Neural Model Status / In-App Download Banner
-            if (!isNeuralReady) {
-                val isCompatible = capability.canDownload && capability.status == DeviceCapabilityStatus.COMPATIBLE
-                val statusColor = if (isCompatible) CompletedGreen else Color(0xFFE57373)
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenModelManager() },
-                    shape = RoundedCornerShape(14.dp),
-                    color = ScreenBg.copy(alpha = 0.65f),
-                    border = BorderStroke(1.dp, statusColor.copy(alpha = 0.45f))
+            // Quick jump to full Nabd AI Chat & Gemma 3 (270M) Manager
+            val isCompatible = capability.canDownload && capability.status == DeviceCapabilityStatus.COMPATIBLE
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenNabdAiChat() },
+                shape = RoundedCornerShape(14.dp),
+                color = ScreenBg.copy(alpha = 0.65f),
+                border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.4f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = if (isCompatible) {
-                                    "تحميل الذكاء الاصطناعي داخل التطبيق (50+ لغة)"
-                                } else {
-                                    "فحص توافق الجهاز مع الذكاء الاصطناعي"
-                                },
-                                color = PrimaryGold,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                            Text(
-                                text = if (isCompatible) "متوافق" else "ممنوع التحميل",
-                                color = statusColor,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 11.sp
-                            )
-                        }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "افتح محادثة «نبض AI» الكاملة (Gemma 3 + الدرر السنية)",
+                            color = PrimaryGold,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
                         Text(
                             text = when {
-                                !isCompatible -> "جهازك غير متوافق مع نموذج الذكاء الاصطناعي العصبي؛ تم قفل التحميل لحماية جهازك وتعمل الشروحات الخفيفة بشكل طبيعي."
-                                downloadState is AiDownloadState.Downloading -> {
-                                    val st = downloadState as AiDownloadState.Downloading
-                                    "${st.stageLabel} (${(st.progress * 100).toInt()}%)"
+                                isGemmaInstalled -> "نموذج Gemma 3 (270M) مثبّت وجاهز ✅"
+                                downloadState is GemmaDownloadState.Downloading -> {
+                                    val st = downloadState as GemmaDownloadState.Downloading
+                                    "جاري تحميل Gemma 3... (${(st.progress * 100).toInt()}%)"
                                 }
-                                downloadState is AiDownloadState.Verifying -> {
-                                    val st = downloadState as AiDownloadState.Verifying
-                                    "جاري التحقق من SHA-256 للملف ${st.fileName}..."
-                                }
-                                else -> "جهازك متوافق تماماً؛ اضغط هنا لفحص العتاد وتحميل النموذج مباشرة من داخل التطبيق."
+                                isCompatible -> "جهازك متوافق لتحميل Gemma 3 (270M) مجاناً"
+                                else -> "التحقق من الأحاديث عبر الدرر السنية متاح مع الإنترنت"
                             },
-                            color = TextSecondary,
-                            fontSize = 11.5.sp
+                            color = if (isGemmaInstalled || isCompatible) CompletedGreen else TextSecondary,
+                            fontSize = 11.sp
                         )
                     }
                 }

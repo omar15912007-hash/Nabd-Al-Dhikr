@@ -40,7 +40,6 @@ import com.nabdaldhikr.app.BuildConfig
 import com.nabdaldhikr.app.R
 import com.nabdaldhikr.app.ai.DeviceCapabilityStatus
 import com.nabdaldhikr.app.reminder.ReminderScheduler
-import com.nabdaldhikr.app.ui.components.AiModelManagerSheet
 import com.nabdaldhikr.app.ui.theme.*
 import com.nabdaldhikr.app.updater.AppUpdateDialog
 import com.nabdaldhikr.app.updater.AppUpdateManager
@@ -64,14 +63,13 @@ fun SettingsScreen(
     val vibrationEnabled by viewModel.vibrationEnabled.collectAsState()
     val reminderEnabled by viewModel.reminderEnabled.collectAsState()
     val capability by aiViewModel.capabilityReport.collectAsState()
-    val installedLanguages by aiViewModel.installedLanguages.collectAsState()
+    val isGemmaInstalled by aiViewModel.isGemmaInstalled.collectAsState()
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var isCheckingUpdate by remember { mutableStateOf(false) }
     var updateDialogInfo by remember { mutableStateOf<UpdateInfo?>(null) }
-    var showAiManagerSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         aiViewModel.refreshCapability()
@@ -299,9 +297,9 @@ fun SettingsScreen(
             
             HorizontalDivider(color = ProgressTrack.copy(alpha = 0.4f))
 
-            // قسم الذكاء الاصطناعي المحلي وحزم اللغات (50+ لغة)
+            // قسم نبض AI (Gemma 3 270M + الدرر السنية)
             Text(
-                text = "الذكاء الاصطناعي واللغات (بدون إنترنت)",
+                text = "نبض AI (مجاني مدى الحياة)",
                 color = PrimaryGold,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp,
@@ -313,15 +311,15 @@ fun SettingsScreen(
 
             ListItem(
                 colors = itemColors,
-                modifier = Modifier.clickable { showAiManagerSheet = true },
+                modifier = Modifier.clickable { navController.navigate("nabd_ai") },
                 headlineContent = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("الذكاء الاصطناعي المحلي (ONNX)", fontWeight = FontWeight.SemiBold)
+                        Text("نموذج Gemma 3 (270M)", fontWeight = FontWeight.SemiBold)
                         Text(
-                            text = if (isAiCompatible) "• متوافق" else "• غير متوافق",
+                            text = if (isAiCompatible) "• متوافق ✅" else "• غير متوافق",
                             color = aiBadgeColor,
                             fontSize = 11.5.sp,
                             fontWeight = FontWeight.Bold
@@ -331,9 +329,9 @@ fun SettingsScreen(
                 supportingContent = {
                     Text(
                         when {
-                            !isAiCompatible -> "تم فحص جهازك ومنع التحميل تلقائياً لحمايته لعدم استيفاء المتطلبات — اضغط لعرض تقرير الفحص."
-                            installedLanguages.isEmpty() -> "جهازك متوافق تماماً؛ اضغط للتحميل والتفعيل من داخل التطبيق."
-                            else -> "الحزم المثبّتة: ${installedLanguages.joinToString(", ")} • يعمل بالكامل بدون إنترنت."
+                            isGemmaInstalled -> "نموذج Gemma 3 (270M) مثبّت وجاهز محلياً + تحقق الدرر السنية."
+                            !isAiCompatible -> capability.statusHeadlineAr
+                            else -> capability.statusHeadlineAr
                         }
                     )
                 },
@@ -342,13 +340,13 @@ fun SettingsScreen(
                 },
                 trailingContent = {
                     OutlinedButton(
-                        onClick = { showAiManagerSheet = true },
+                        onClick = { navController.navigate("nabd_ai") },
                         shape = RoundedCornerShape(8.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, if (isAiCompatible) PrimaryGold else aiBadgeColor),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = if (isAiCompatible) "تحميل وإدارة" else "تقرير الفحص",
+                            text = if (isGemmaInstalled) "فتح" else if (isAiCompatible) "تحميل" else "الفحص",
                             color = if (isAiCompatible) PrimaryGold else aiBadgeColor,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
@@ -471,13 +469,6 @@ fun SettingsScreen(
             AppUpdateDialog(
                 updateInfo = info,
                 onDismiss = { updateDialogInfo = null }
-            )
-        }
-
-        if (showAiManagerSheet) {
-            AiModelManagerSheet(
-                aiViewModel = aiViewModel,
-                onDismiss = { showAiManagerSheet = false }
             )
         }
     }

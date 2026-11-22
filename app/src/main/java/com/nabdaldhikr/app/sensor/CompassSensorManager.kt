@@ -154,28 +154,11 @@ class CompassSensorManager(context: Context) : SensorEventListener {
      * - مائل أو عمودي في يد المستخدم (Tilted / Upright): إعادة التعيين إلى (X, Z).
      */
     private fun processRotationMatrix(matrix: FloatArray) {
-        // حساب زوايا الاتجاه المبدئية لمعرفة زاوية الميل (Pitch)
-        SensorManager.getOrientation(matrix, orientationAngles)
-        val pitch = Math.toDegrees(orientationAngles[1].toDouble())
-
-        val headingRad: Float = if (abs(pitch) > 45.0) {
-            // الهاتف محمول بزاوية مائلة أو عمودية نحو وجه المستخدم
-            SensorManager.remapCoordinateSystem(
-                matrix,
-                SensorManager.AXIS_X,
-                SensorManager.AXIS_Z,
-                remappedMatrix
-            )
-            SensorManager.getOrientation(remappedMatrix, orientationAngles)
-            orientationAngles[0]
-        } else {
-            // الهاتف مستوٍ أفقياً
-            orientationAngles[0]
-        }
-
-        // تحويل الراديان إلى درجات وتطبيعها [0, 360)
-        val rawDegrees = Math.toDegrees(headingRad.toDouble())
-        val normalizedRaw = QiblaMathUtils.normalize360(rawDegrees).toFloat()
+        // استخراج الاتجاه الحقيقي بدون أي انقلاب 180° عند إمالة الهاتف بين الوضع الأفقي والعمودي
+        val normalizedRaw = QiblaMathUtils.extractHorizontalHeading(
+            rotationMatrix = matrix,
+            isCameraMode = false
+        )
 
         // تطبيق مرشح التمرير المنخفض (Low-Pass Filter) لتنعيم الحركة
         currentFilteredHeading = if (currentFilteredHeading == 0f) {

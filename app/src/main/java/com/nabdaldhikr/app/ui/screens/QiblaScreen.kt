@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
@@ -31,6 +32,13 @@ import android.view.Surface
 import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
+import com.nabdaldhikr.app.util.QiblaMathUtils
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
@@ -94,12 +102,13 @@ fun QiblaScreen(
     val view = LocalView.current
     val scope = rememberCoroutineScope()
 
-    // حالة الموقع الجغرافي
-    var userLat by remember { mutableDoubleStateOf(30.0444) } // افتراضي مبدئي (القاهرة) حتى يلتقط الـ GPS
-    var userLon by remember { mutableDoubleStateOf(31.2357) }
+    // حالة الموقع الجغرافي الدقيق (بدون عرض قبلة وهمية قبل التقاط الموقع الحقيقي)
+    var userLat by remember { mutableDoubleStateOf(0.0) }
+    var userLon by remember { mutableDoubleStateOf(0.0) }
     var userAlt by remember { mutableDoubleStateOf(0.0) }
+    var hasValidLocation by remember { mutableStateOf(false) }
     var accuracyMeters by remember { mutableFloatStateOf(0f) }
-    var locationSource by remember { mutableStateOf("جاري تحديد الموقع الدقيق...") }
+    var locationSource by remember { mutableStateOf("جاري تحديد موقعك الدقيق...") }
     var cityName by remember { mutableStateOf("تحديد الموقع...") }
     var isGpsEnabled by remember { mutableStateOf(true) }
     var hasLocationPermission by remember {
@@ -109,36 +118,58 @@ fun QiblaScreen(
         )
     }
 
-    // حالة وضع الكاميرا (AR مثل Qibla Finder)
-    var isArMode by remember { mutableStateOf(false) }
+    // حالة وضع الكاميرا (AR بالكاميرا افتراضياً فور منح الصلاحية)
     var hasCameraPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         )
     }
+    var isArMode by remember { mutableStateOf(hasCameraPermission) }
+    var cameraHorizontalFov by remember { mutableFloatStateOf(55f) }
 
-    // قراءات الحساسات (البوصلة والميل ثلاثي الأبعاد)
+    // قراءات الحساسات (البوصلة الدقيقة + ارتفاع عدسة الكاميرا + كشف التداخل المغناطيسي)
     var smoothAzimuth by remember { mutableFloatStateOf(0f) }
+    var hasAzimuthFix by remember { mutableStateOf(false) }
+    var smoothElevation by remember { mutableFloatStateOf(0f) }
     var smoothPitch by remember { mutableFloatStateOf(0f) }
     var smoothRoll by remember { mutableFloatStateOf(0f) }
     var sensorAccuracy by remember { mutableIntStateOf(SensorManager.SENSOR_STATUS_ACCURACY_HIGH) }
+    var isMagneticInterfered by remember { mutableStateOf(false) }
     var hasSensor by remember { mutableStateOf(true) }
 
-    // حساب زاوية القبلة والمسافة إلى الكعبة المشرفة
-    val qiblaBearing = remember(userLat, userLon) {
-        calculateQiblaBearing(userLat, userLon)
+    // حساب الانحراف المغناطيسي مرة واحدة عند تحديث الموقع (صفر تخصيص داخل 60fps)
+    val magneticDeclination = remember(userLat, userLon, userAlt, hasValidLocation) {
+        if (!hasValidLocation) 0f
+        else try {
+            GeomagneticField(
+                userLat.toFloat(),
+                userLon.toFloat(),
+                userAlt.toFloat(),
+                System.currentTimeMillis()
+            ).declination
+        } catch (_: Exception) {
+            0f
+        }
     }
-    val distanceKm = remember(userLat, userLon) {
-        calculateDistanceKm(userLat, userLon, KAABA_LAT, KAABA_LON)
+
+    // حساب زاوية القبلة والمسافة إلى الكعبة المشرفة
+    val qiblaBearing = remember(userLat, userLon, hasValidLocation) {
+        if (hasValidLocation) QiblaMathUtils.calculateQiblaBearing(userLat, userLon) else 0f
+    }
+    val distanceKm = remember(userLat, userLon, hasValidLocation) {
+        if (hasValidLocation) QiblaMathUtils.calculateDistanceToKaabaKm(userLat, userLon) else 0.0
     }
 
     // فرق الزاوية الدائري الأقصر (-180 إلى +180)
     // موجب = القبلة على اليمين، سالب = القبلة على اليسار
     val angleDelta = remember(smoothAzimuth, qiblaBearing) {
-        ((qiblaBearing - smoothAzimuth + 540f) % 360f) - 180f
+        QiblaMathUtils.calculateShortestAngleDelta(smoothAzimuth, qiblaBearing)
     }
     val absDelta = abs(angleDelta)
-    val isAligned = absDelta <= 4.5f
+    val isAligned = hasValidLocation && hasAzimuthFix && absDelta <= 2.5f
+    val needsCalibration = isMagneticInterfered ||
+        sensorAccuracy == SensorManager.SENSOR_STATUS_ACCURACY_LOW ||
+        sensorAccuracy == SensorManager.SENSOR_STATUS_UNRELIABLE
 
     // اهتزاز عند التطابق مع اتجاه القبلة
     var wasAligned by remember { mutableStateOf(false) }
@@ -189,9 +220,10 @@ fun QiblaScreen(
                         val country = json.optString("country", "")
                         if (!lat.isNaN() && !lon.isNaN()) {
                             withContext(Dispatchers.Main) {
-                                if (accuracyMeters == 0f) {
+                                if (!hasValidLocation || accuracyMeters == 0f) {
                                     userLat = lat
                                     userLon = lon
+                                    hasValidLocation = true
                                     locationSource = "تحديد عبر الشبكة"
                                     val label = listOf(city, country).filter { it.isNotBlank() }.joinToString("، ")
                                     if (label.isNotBlank()) cityName = label
@@ -210,7 +242,22 @@ fun QiblaScreen(
         }
     }
 
-    // تحديث الموقع من نظام أندرويد (GPS + Network)
+    val fusedLocationClient = remember(context) { LocationServices.getFusedLocationProviderClient(context) }
+
+    fun applyPreciseLocation(loc: Location, labelPrefix: String) {
+        userLat = loc.latitude
+        userLon = loc.longitude
+        userAlt = loc.altitude
+        hasValidLocation = true
+        accuracyMeters = loc.accuracy
+        locationSource = "$labelPrefix (±${loc.accuracy.roundToInt()} م)"
+        if (cityName == "تحديد الموقع...") {
+            cityName = String.format(Locale.US, "%.4f°, %.4f°", userLat, userLon)
+        }
+        resolvePlaceName(loc.latitude, loc.longitude)
+    }
+
+    // تحديث الموقع الدقيق عبر FusedLocationProviderClient (PRIORITY_HIGH_ACCURACY) + LocationManager
     @SuppressLint("MissingPermission")
     fun refreshLocation() {
         val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -223,6 +270,27 @@ fun QiblaScreen(
             return
         }
 
+        // 1. طلب قراءة فورية عالية الدقة من Google FusedLocationProviderClient
+        val cts = CancellationTokenSource()
+        fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cts.token)
+            .addOnSuccessListener { fresh ->
+                if (fresh != null) {
+                    applyPreciseLocation(fresh, "GPS عالي الدقة")
+                } else {
+                    fusedLocationClient.lastLocation.addOnSuccessListener { cached ->
+                        if (cached != null) {
+                            applyPreciseLocation(cached, "GPS دقيق")
+                        } else if (!hasValidLocation) {
+                            fetchNetworkIpLocationIfNeeded()
+                        }
+                    }
+                }
+            }
+            .addOnFailureListener {
+                if (!hasValidLocation) fetchNetworkIpLocationIfNeeded()
+            }
+
+        // 2. قراءة فورية من أفضل آخر موقع متاح لتسريع العرض الأولي
         val providers = listOf(
             LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,
@@ -238,20 +306,9 @@ fun QiblaScreen(
             } catch (_: Exception) {}
         }
 
-        if (bestLoc != null) {
-            userLat = bestLoc.latitude
-            userLon = bestLoc.longitude
-            userAlt = bestLoc.altitude
-            accuracyMeters = bestLoc.accuracy
-            locationSource = if (bestLoc.provider == LocationManager.GPS_PROVIDER) {
-                "GPS دقيق (±${bestLoc.accuracy.roundToInt()} م)"
-            } else {
-                "موقع الشبكة (±${bestLoc.accuracy.roundToInt()} م)"
-            }
-            cityName = String.format(Locale.US, "%.4f°, %.4f°", userLat, userLon)
-            resolvePlaceName(userLat, userLon)
-        } else {
-            fetchNetworkIpLocationIfNeeded()
+        if (bestLoc != null && !hasValidLocation) {
+            val tag = if (bestLoc.provider == LocationManager.GPS_PROVIDER) "GPS دقيق" else "موقع الشبكة"
+            applyPreciseLocation(bestLoc, tag)
         }
     }
 
@@ -270,7 +327,7 @@ fun QiblaScreen(
         if (granted) isArMode = true
     }
 
-    // طلب صلاحية الموقع عند فتح الشاشة لأول مرة
+    // طلب صلاحية الموقع (والكاميرا للواقع المعزز) عند فتح الشاشة لأول مرة
     LaunchedEffect(Unit) {
         if (!hasLocationPermission) {
             locationPermissionLauncher.launch(
@@ -282,6 +339,9 @@ fun QiblaScreen(
         } else {
             refreshLocation()
         }
+        if (!hasCameraPermission) {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     // الاستماع المستمر لتحديثات الموقع (GPS + Network)
@@ -289,16 +349,8 @@ fun QiblaScreen(
         val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val listener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
-                userLat = location.latitude
-                userLon = location.longitude
-                userAlt = location.altitude
-                accuracyMeters = location.accuracy
-                locationSource = if (location.provider == LocationManager.GPS_PROVIDER) {
-                    "GPS مباشر (±${location.accuracy.roundToInt()} م)"
-                } else {
-                    "الشبكة المباشرة (±${location.accuracy.roundToInt()} م)"
-                }
-                resolvePlaceName(location.latitude, location.longitude)
+                val tag = if (location.provider == LocationManager.GPS_PROVIDER) "GPS مباشر" else "الشبكة المباشرة"
+                applyPreciseLocation(location, tag)
             }
             @Deprecated("Deprecated in Java")
             override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
@@ -324,9 +376,12 @@ fun QiblaScreen(
         }
     }
 
-    // الاستماع لحساسات الاتجاه والمجال المغناطيسي مع تصحيح الشمال الجغرافي الحقيقي (True North)
-    // ودعم مسك الهاتف أفقياً (وضع البوصلة) أو عمودياً (وضع الكاميرا AR)
-    DisposableEffect(userLat, userLon, userAlt, isArMode) {
+    // الاستماع لحساسات الاتجاه والمجال المغناطيسي مع إسقاط متجهي عالمي (ENU) دقيق 100% بدون أي انقلاب 180°
+    // وكشف التداخل المغناطيسي (20..75 µT) وتصحيح الشمال الجغرافي الحقيقي (True North)
+    val latestDeclination by rememberUpdatedState(magneticDeclination)
+    val latestArMode by rememberUpdatedState(isArMode)
+
+    DisposableEffect(Unit) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         val accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -337,7 +392,6 @@ fun QiblaScreen(
         }
 
         val rotationMatrix = FloatArray(9)
-        val remappedMatrix = FloatArray(9)
         val orientationAngles = FloatArray(3)
         val gravity = FloatArray(3)
         val geomagnetic = FloatArray(3)
@@ -347,55 +401,62 @@ fun QiblaScreen(
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 var matrixReady = false
-                if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
-                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                    matrixReady = true
-                } else if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-                    lowPassFilter(event.values, gravity, 0.15f)
-                    hasGravity = true
-                } else if (event.sensor.type == Sensor.TYPE_MAGNETIC_FIELD) {
-                    lowPassFilter(event.values, geomagnetic, 0.15f)
-                    hasMag = true
+                when (event.sensor.type) {
+                    Sensor.TYPE_ROTATION_VECTOR -> {
+                        SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                        matrixReady = true
+                    }
+                    Sensor.TYPE_ACCELEROMETER -> {
+                        lowPassFilter(event.values, gravity, 0.15f)
+                        hasGravity = true
+                    }
+                    Sensor.TYPE_MAGNETIC_FIELD -> {
+                        // كشف فوري للتداخل المغناطيسي (معادن أو مغناطيس جراب الهاتف)
+                        val bx = event.values[0]
+                        val by = event.values[1]
+                        val bz = event.values[2]
+                        val fieldStrength = sqrt(bx * bx + by * by + bz * bz)
+                        isMagneticInterfered = QiblaMathUtils.isMagneticFieldInterfered(fieldStrength)
+
+                        lowPassFilter(event.values, geomagnetic, 0.15f)
+                        hasMag = true
+                    }
                 }
 
-                if (!matrixReady && hasGravity && hasMag) {
+                if (!matrixReady && rotationSensor == null && hasGravity && hasMag) {
                     matrixReady = SensorManager.getRotationMatrix(rotationMatrix, null, gravity, geomagnetic)
                 }
 
                 if (matrixReady) {
-                    // فحص زاوية ميل الهاتف: إذا كان في وضع الكاميرا أو مرفوعاً عمودياً نعيد توجيه المحاور (AXIS_X, AXIS_Z)
-                    val zTilt = abs(rotationMatrix[8])
-                    val useUprightRemap = isArMode || zTilt < 0.55f
-                    if (useUprightRemap) {
-                        SensorManager.remapCoordinateSystem(
-                            rotationMatrix,
-                            SensorManager.AXIS_X,
-                            SensorManager.AXIS_Z,
-                            remappedMatrix
-                        )
-                        SensorManager.getOrientation(remappedMatrix, orientationAngles)
-                    } else {
-                        SensorManager.getOrientation(rotationMatrix, orientationAngles)
-                    }
+                    // استخراج زاوية الاتجاه الحقيقية عبر الإسقاط المتجهي المباشر (عدسة الكاميرا الخلفية -Z في AR)
+                    val magAzimuthDeg = QiblaMathUtils.extractHorizontalHeading(
+                        rotationMatrix = rotationMatrix,
+                        isCameraMode = latestArMode
+                    )
+                    val elevationDeg = QiblaMathUtils.extractCameraElevationDegrees(rotationMatrix)
 
-                    val magAzimuthDeg = (Math.toDegrees(orientationAngles[0].toDouble()).toFloat() + 360f) % 360f
+                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
                     val pitchDeg = Math.toDegrees(orientationAngles[1].toDouble()).toFloat()
                     val rollDeg = Math.toDegrees(orientationAngles[2].toDouble()).toFloat()
 
-                    // تصحيح الانحراف المغناطيسي للحصول على الشمال الجغرافي الحقيقي (True North)
-                    val geoField = GeomagneticField(
-                        userLat.toFloat(),
-                        userLon.toFloat(),
-                        userAlt.toFloat(),
-                        System.currentTimeMillis()
-                    )
-                    val trueAzimuth = (magAzimuthDeg + geoField.declination + 360f) % 360f
+                    val trueAzimuth = QiblaMathUtils.normalize360(
+                        (magAzimuthDeg + latestDeclination).toDouble()
+                    ).toFloat()
 
-                    // تنعيم دائري ذكي لمنع القفز عند الانتقال بين 359° و 0°
-                    val diff = ((trueAzimuth - smoothAzimuth + 540f) % 360f) - 180f
-                    smoothAzimuth = (smoothAzimuth + diff * 0.18f + 360f) % 360f
-                    smoothPitch += (pitchDeg - smoothPitch) * 0.18f
-                    smoothRoll += (rollDeg - smoothRoll) * 0.18f
+                    // تنعيم دائري فائق السلاسة عبر Sin/Cos مع تثبيت أول قراءة مباشرة
+                    if (!hasAzimuthFix) {
+                        smoothAzimuth = trueAzimuth
+                        smoothElevation = elevationDeg
+                        smoothPitch = pitchDeg
+                        smoothRoll = rollDeg
+                        hasAzimuthFix = true
+                    } else {
+                        val diff = QiblaMathUtils.calculateShortestAngleDelta(smoothAzimuth, trueAzimuth)
+                        smoothAzimuth = QiblaMathUtils.normalize360((smoothAzimuth + diff * 0.22f).toDouble()).toFloat()
+                        smoothElevation += (elevationDeg - smoothElevation) * 0.22f
+                        smoothPitch += (pitchDeg - smoothPitch) * 0.18f
+                        smoothRoll += (rollDeg - smoothRoll) * 0.18f
+                    }
                 }
             }
 
@@ -408,6 +469,10 @@ fun QiblaScreen(
 
         if (rotationSensor != null) {
             sensorManager.registerListener(listener, rotationSensor, SensorManager.SENSOR_DELAY_GAME)
+            // تسجيل المغناطيسية بشكل خفيف بجانب Rotation Vector لكشف التداخل المغناطيسي بدقة
+            if (magSensor != null) {
+                sensorManager.registerListener(listener, magSensor, SensorManager.SENSOR_DELAY_UI)
+            }
         } else if (accelSensor != null && magSensor != null) {
             sensorManager.registerListener(listener, accelSensor, SensorManager.SENSOR_DELAY_GAME)
             sensorManager.registerListener(listener, magSensor, SensorManager.SENSOR_DELAY_GAME)
@@ -512,12 +577,15 @@ fun QiblaScreen(
         ) {
             // 1. خلفية الكاميرا المباشرة عند تفعيل وضع الواقع المعزز (AR مثل Google Qibla Finder)
             if (isArMode && hasCameraPermission) {
-                CameraPreviewSurface(modifier = Modifier.fillMaxSize())
+                CameraPreviewSurface(
+                    modifier = Modifier.fillMaxSize(),
+                    onHorizontalFovMeasured = { fov -> cameraHorizontalFov = fov }
+                )
                 // طبقة تظليل خفيفة لإبراز عناصر الواقع المعزز بوضوح
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.28f))
+                        .background(Color.Black.copy(alpha = 0.25f))
                 )
             }
 
@@ -538,12 +606,13 @@ fun QiblaScreen(
                 )
 
                 if (isArMode) {
-                    // ب) وضع الكاميرا (AR): عدسة Qibla Finder التفاعلية مع بوابة الكعبة المتحركة ثلاثية الأبعاد
+                    // ب) وضع الكاميرا (AR): عدسة Qibla Finder التفاعلية مع بوابة الكعبة المثبتة على الأفق الحقيقي
                     drawArQiblaFinderOverlay(
                         centerX = centerX,
                         centerY = centerY,
                         angleDelta = angleDelta,
-                        pitch = smoothPitch,
+                        elevationDeg = smoothElevation,
+                        horizontalFov = cameraHorizontalFov,
                         isAligned = isAligned,
                         pulseFraction = pulseRadiusFraction,
                         arrowPhase = arrowPhase,
@@ -627,7 +696,8 @@ fun QiblaScreen(
                 ) {
                     val guidanceText = when {
                         !hasSensor -> "جهازك لا يحتوي على حساس بوصلة مغناطيسي"
-                        isAligned -> "أنت الآن باتجاه القبلة الصحيح تماماً"
+                        !hasValidLocation -> "جاري تحديد موقعك الجغرافي الدقيق..."
+                        isAligned -> "أنت الآن باتجاه القبلة الصحيح تماماً (±2.5°)"
                         angleDelta > 0 -> "استدر لليمين بمقدار ${absDelta.roundToInt()}° نحو الكعبة"
                         else -> "استدر لليسار بمقدار ${absDelta.roundToInt()}° نحو الكعبة"
                     }
@@ -638,6 +708,29 @@ fun QiblaScreen(
                         fontSize = 14.sp,
                         modifier = Modifier.padding(horizontal = 18.dp, vertical = 7.dp)
                     )
+                }
+
+                // تنبيه فوري عند وجود تداخل مغناطيسي أو حاجة لمعايرة البوصلة بحركة ∞
+                if (needsCalibration && hasSensor) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xCC3B240C),
+                        border = BorderStroke(1.dp, WarningAmber)
+                    ) {
+                        Text(
+                            text = if (isMagneticInterfered) {
+                                "⚠ تداخل مغناطيسي قريب! أبعد الهاتف عن المعادن والمغناطيس وحرّكه بشكل رقم 8 (∞)"
+                            } else {
+                                "⚠ دقة البوصلة منخفضة — حرّك الهاتف في الهواء بشكل رقم 8 (∞) للمعايرة"
+                            },
+                            color = TextPrimary,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                    }
                 }
             }
 
@@ -1129,7 +1222,8 @@ private fun DrawScope.drawArQiblaFinderOverlay(
     centerX: Float,
     centerY: Float,
     angleDelta: Float,
-    pitch: Float,
+    elevationDeg: Float,
+    horizontalFov: Float,
     isAligned: Boolean,
     pulseFraction: Float,
     arrowPhase: Float,
@@ -1139,12 +1233,12 @@ private fun DrawScope.drawArQiblaFinderOverlay(
     val center = Offset(centerX, centerY)
     val reticleRadius = 56.dp.toPx()
 
-    // حساب موقع بوابة الكعبة في الفضاء ثلاثي الأبعاد على الشاشة
-    val horizontalFov = 65f
-    val pxPerDegX = size.width / horizontalFov
+    // إسقاط دقيق لبوابة الكعبة باستخدام مجال الرؤية البصري الحقيقي لعدسة الكاميرا (FOV) وزاوية الأفق الحقيقية (0° = الأفق)
+    val safeFov = horizontalFov.coerceIn(40f, 80f)
+    val pxPerDegX = size.width / safeFov
     val rawKaabaX = centerX + angleDelta * pxPerDegX
-    // إزاحة رأسية ناعمة حسب زاوية ميل الكاميرا
-    val rawKaabaY = centerY + ((pitch + 75f).coerceIn(-25f, 25f) * 2.5.dp.toPx())
+    val rawKaabaY = (centerY + (elevationDeg.coerceIn(-35f, 35f) * (size.height / (safeFov * 1.45f))))
+        .coerceIn(130.dp.toPx(), size.height * 0.68f)
 
     val clampedKaabaX = rawKaabaX.coerceIn(48.dp.toPx(), size.width - 48.dp.toPx())
     val kaabaPos = Offset(clampedKaabaX, rawKaabaY)
@@ -1310,14 +1404,42 @@ private fun activeBorderColor(isAligned: Boolean): Color =
     if (isAligned) CompletedGreen else PrimaryGold.copy(alpha = 0.55f)
 
 /**
- * معاينة الكاميرا الخلفية المباشرة باستخدام Camera2 API بدون أي مكتبات خارجية ثقيلة
+ * معاينة الكاميرا الخلفية المباشرة باستخدام Camera2 API مع ضبط نسبة الأبعاد (Center-Crop Matrix بدون مطّ)،
+ * وقياس مجال الرؤية البصري الحقيقي للعدسة (FOV)، وإغلاق محكم مع دورة الحياة لمنع تسرب الموارد.
  */
 @SuppressLint("MissingPermission")
 @Composable
-private fun CameraPreviewSurface(modifier: Modifier = Modifier) {
+private fun CameraPreviewSurface(
+    modifier: Modifier = Modifier,
+    onHorizontalFovMeasured: (Float) -> Unit
+) {
     val context = LocalContext.current
-    DisposableEffect(Unit) {
-        onDispose { }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraHolder = remember { arrayOfNulls<CameraDevice>(1) }
+    val sessionHolder = remember { arrayOfNulls<CameraCaptureSession>(1) }
+
+    fun closeCameraSafely() {
+        try {
+            sessionHolder[0]?.close()
+        } catch (_: Exception) {}
+        sessionHolder[0] = null
+        try {
+            cameraHolder[0]?.close()
+        } catch (_: Exception) {}
+        cameraHolder[0] = null
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                closeCameraSafely()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            closeCameraSafely()
+        }
     }
 
     AndroidView(
@@ -1325,23 +1447,24 @@ private fun CameraPreviewSurface(modifier: Modifier = Modifier) {
         factory = { ctx ->
             TextureView(ctx).apply {
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                    private var cameraDevice: CameraDevice? = null
-                    private var captureSession: CameraCaptureSession? = null
-
                     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                        openRearCamera(ctx, surface) { cam, session ->
-                            cameraDevice = cam
-                            captureSession = session
+                        openRearCamera(
+                            context = ctx,
+                            textureView = this@apply,
+                            surfaceTexture = surface,
+                            viewWidth = width,
+                            viewHeight = height,
+                            onFovMeasured = onHorizontalFovMeasured
+                        ) { cam, session ->
+                            cameraHolder[0] = cam
+                            sessionHolder[0] = session
                         }
                     }
 
                     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
 
                     override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                        try {
-                            captureSession?.close()
-                            cameraDevice?.close()
-                        } catch (_: Exception) {}
+                        closeCameraSafely()
                         return true
                     }
 
@@ -1355,7 +1478,11 @@ private fun CameraPreviewSurface(modifier: Modifier = Modifier) {
 @SuppressLint("MissingPermission")
 private fun openRearCamera(
     context: Context,
+    textureView: TextureView,
     surfaceTexture: SurfaceTexture,
+    viewWidth: Int,
+    viewHeight: Int,
+    onFovMeasured: (Float) -> Unit,
     onOpened: (CameraDevice?, CameraCaptureSession?) -> Unit
 ) {
     try {
@@ -1365,7 +1492,45 @@ private fun openRearCamera(
             chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
         } ?: manager.cameraIdList.firstOrNull() ?: return
 
-        surfaceTexture.setDefaultBufferSize(1280, 720)
+        val chars = manager.getCameraCharacteristics(cameraId)
+
+        // حساب مجال الرؤية البصري الحقيقي للعدسة في الوضع العمودي (Portrait Horizontal FOV)
+        val sensorSize = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val focalLengths = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+        val focalLength = focalLengths?.firstOrNull()
+        if (sensorSize != null && focalLength != null && focalLength > 0f) {
+            // في الوضع العمودي: العرض الأفقي للشاشة يقابل البعد الأصغر للمستشعر
+            val portraitSensorWidth = min(sensorSize.width, sensorSize.height).toDouble()
+            val fovRad = 2.0 * atan(portraitSensorWidth / (2.0 * focalLength.toDouble()))
+            val fovDeg = Math.toDegrees(fovRad).toFloat().coerceIn(42f, 75f)
+            onFovMeasured(fovDeg)
+        }
+
+        // اختيار أنسب دقة معاينة مدعومة وتطبيق مصفوفة Center-Crop لمنع أي مطّ للصورة
+        val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val availableSizes = streamMap?.getOutputSizes(SurfaceTexture::class.java).orEmpty()
+        val chosenSize = availableSizes
+            .filter { it.width <= 1920 && it.height <= 1080 }
+            .maxByOrNull { it.width * it.height }
+            ?: availableSizes.firstOrNull()
+
+        val previewW = chosenSize?.width ?: 1280
+        val previewH = chosenSize?.height ?: 720
+        surfaceTexture.setDefaultBufferSize(previewW, previewH)
+
+        if (viewWidth > 0 && viewHeight > 0) {
+            val matrix = Matrix()
+            val centerX = viewWidth / 2f
+            val centerY = viewHeight / 2f
+            // الحساس في أندرويد غالباً بزاوية 90° (عرضه أكبر من ارتفاعه) بينما الشاشة عمودية
+            val bufferAspect = previewH.toFloat() / previewW.toFloat() // width/height after 90° rotation
+            val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+            val scaleX = if (bufferAspect > viewAspect) bufferAspect / viewAspect else 1f
+            val scaleY = if (bufferAspect < viewAspect) viewAspect / bufferAspect else 1f
+            matrix.setScale(scaleX, scaleY, centerX, centerY)
+            textureView.setTransform(matrix)
+        }
+
         val previewSurface = Surface(surfaceTexture)
         val mainHandler = Handler(Looper.getMainLooper())
 
@@ -1404,33 +1569,6 @@ private fun openRearCamera(
             }
         }, mainHandler)
     } catch (_: Exception) {}
-}
-
-/**
- * معادلة الدائرة العظمى (Great-Circle Bearing) لحساب زاوية القبلة بدقة فلكية من أي نقطة على الأرض
- */
-private fun calculateQiblaBearing(lat: Double, lon: Double): Float {
-    val phi1 = Math.toRadians(lat)
-    val phi2 = Math.toRadians(KAABA_LAT)
-    val deltaLon = Math.toRadians(KAABA_LON - lon)
-
-    val y = sin(deltaLon) * cos(phi2)
-    val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(deltaLon)
-    val theta = Math.toDegrees(atan2(y, x))
-    return ((theta + 360.0) % 360.0).toFloat()
-}
-
-/**
- * حساب المسافة بالكيلومتر بين موقع المستخدم والكعبة المشرفة بمعادلة Haversine
- */
-private fun calculateDistanceKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-    val earthRadiusKm = 6371.0
-    val dLat = Math.toRadians(lat2 - lat1)
-    val dLon = Math.toRadians(lon2 - lon1)
-    val a = sin(dLat / 2).pow(2.0) +
-            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2.0)
-    val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return earthRadiusKm * c
 }
 
 private fun lowPassFilter(input: FloatArray, output: FloatArray, alpha: Float) {

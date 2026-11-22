@@ -18,7 +18,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
-import com.nabdaldhikr.app.ai.AiQueryOutcome
+import com.nabdaldhikr.app.ai.NabdAiRouter
 import com.nabdaldhikr.app.data.model.Azkar
 import com.nabdaldhikr.app.ui.theme.*
 import com.nabdaldhikr.app.viewmodel.AiAssistantViewModel
@@ -39,14 +39,8 @@ fun SearchScreen(
     aiViewModel: AiAssistantViewModel
 ) {
     val categories by azkarViewModel.categories.collectAsState()
-    val aiOutcome by aiViewModel.homeSearchOutcome.collectAsState()
     var query by remember { mutableStateOf("") }
 
-    DisposableEffect(Unit) {
-        onDispose { aiViewModel.clearHomeSearch() }
-    }
-
-    // تجريد التشكيل وتطبيع الهمزات للبحث العربي
     val tashkeelRegex = remember { Regex("[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED]") }
     fun normalize(text: String): String {
         return tashkeelRegex.replace(text, "")
@@ -54,8 +48,13 @@ fun SearchScreen(
             .replace('ة', 'ه')
     }
 
-    val results = remember(categories, query) {
-        if (query.isBlank()) {
+    val isFatwaBlocked = remember(query) { query.isNotBlank() && aiViewModel.isFatwaQuery(query) }
+    val smartMatches = remember(categories, query) {
+        if (query.isBlank() || isFatwaBlocked) emptyList() else aiViewModel.findLocalSearchMatches(query, categories)
+    }
+
+    val literalResults = remember(categories, query, isFatwaBlocked) {
+        if (query.isBlank() || isFatwaBlocked) {
             emptyList()
         } else {
             val q = normalize(query.trim())
@@ -78,11 +77,8 @@ fun SearchScreen(
                 title = {
                     OutlinedTextField(
                         value = query,
-                        onValueChange = { updated ->
-                            query = updated
-                            aiViewModel.runSemanticSearch(updated, categories)
-                        },
-                        placeholder = { Text("ابحث بذكر أو شعور (مثلاً: قلقان، سفر)...", color = TextSecondary, fontSize = 13.sp) },
+                        onValueChange = { query = it },
+                        placeholder = { Text("ابحث عن ذكر أو حالة شعورية...", color = TextSecondary, fontSize = 13.sp) },
                         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = PrimaryGold) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -101,9 +97,7 @@ fun SearchScreen(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = TextPrimary)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = HeaderBg
-                )
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = HeaderBg)
             )
         }
     ) { padding ->
@@ -122,13 +116,39 @@ fun SearchScreen(
                     modifier = Modifier.size(72.dp)
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "ابحث في الأذكار",
-                    fontSize = 16.sp,
-                    color = TextPrimary
-                )
+                Text("ابحث في الأذكار أو افتح نبض AI", fontSize = 16.sp, color = TextPrimary)
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = { navController.navigate("nabd_ai") },
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryGold, contentColor = ScreenBg),
+                    shape = RoundedCornerShape(20.dp)
+                ) {
+                    Text("فتح محادثة نبض AI ✨", fontWeight = FontWeight.Bold)
+                }
             }
-        } else if (results.isEmpty() && aiOutcome !is AiQueryOutcome.Match) {
+        } else if (isFatwaBlocked) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = AiSheetBg),
+                    border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.45f))
+                ) {
+                    Text(
+                        text = NabdAiRouter.FATWA_REFUSAL_MESSAGE_AR,
+                        fontSize = 14.sp,
+                        color = TextPrimary,
+                        lineHeight = 22.sp,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+            }
+        } else if (literalResults.isEmpty() && smartMatches.isEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -137,27 +157,14 @@ fun SearchScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val blocked = aiOutcome as? AiQueryOutcome.BlockedOutOfScope
-                if (blocked != null) {
-                    Card(
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = AiSheetBg),
-                        border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.45f))
-                    ) {
-                        Text(
-                            text = blocked.message,
-                            fontSize = 14.sp,
-                            color = TextPrimary,
-                            lineHeight = 22.sp,
-                            modifier = Modifier.padding(16.dp)
-                        )
-                    }
-                } else {
-                    Text(
-                        text = "لا توجد نتائج",
-                        fontSize = 16.sp,
-                        color = TextSecondary
-                    )
+                Text("لا توجد نتائج محلية مطابقة", fontSize = 16.sp, color = TextSecondary)
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = { navController.navigate("nabd_ai") },
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryGold, contentColor = ScreenBg),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text("ابحث عبر نبض AI والدرر السنية ✨", fontWeight = FontWeight.Bold)
                 }
             }
         } else {
@@ -168,83 +175,36 @@ fun SearchScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                val semanticMatchOutcome = aiOutcome as? AiQueryOutcome.Match
-                if (semanticMatchOutcome != null) {
-                    item(key = "ai_semantic_header") {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = AppIcons.AutoAwesome,
-                                contentDescription = null,
-                                tint = PrimaryGold,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "نتائج البحث الدلالي الذكي ✨ (${semanticMatchOutcome.latencyMs}ms)",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = PrimaryGold
-                            )
-                        }
+                if (smartMatches.isNotEmpty()) {
+                    item(key = "smart_header") {
+                        Text(
+                            text = "نتائج نبض AI المحلية ✨",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryGold
+                        )
                     }
-                    val aiMatches = listOf(semanticMatchOutcome.bestMatch) + semanticMatchOutcome.alternatives
-                    items(aiMatches, key = { "ai_${it.categoryId}_${it.dhikrId}" }) { match ->
+                    items(smartMatches, key = { "smart_${it.categoryId}_${it.dhikrId}" }) { match ->
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    val cat = azkarViewModel.getCategory(match.categoryId)
-                                    val idx = cat?.azkarList?.indexOfFirst { it.id == match.dhikrId }
-                                        ?.takeIf { it >= 0 } ?: (match.orderIndex - 1).coerceAtLeast(0)
-                                    if (match.categoryId.isNotBlank()) {
-                                        navController.navigate("azkar_detail/${match.categoryId}/$idx")
-                                    }
+                                    navController.navigate("azkar_detail/${match.categoryId}/${match.indexInCategory}")
                                 },
                             shape = RoundedCornerShape(20.dp),
                             colors = CardDefaults.cardColors(containerColor = AiSheetBg),
-                            border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.5f))
+                            border = BorderStroke(1.dp, PrimaryGold.copy(alpha = 0.45f))
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = match.categoryName,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = PrimaryGold
-                                    )
-                                    Text(
-                                        text = "تطابق ${(match.similarityScore * 100).toInt()}%",
-                                        fontSize = 11.sp,
-                                        color = CompletedGreen
-                                    )
-                                }
+                                Text(match.categoryName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = PrimaryGold)
                                 Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = match.dhikrText,
-                                    fontSize = 15.sp,
-                                    maxLines = 3,
-                                    overflow = TextOverflow.Ellipsis,
-                                    color = TextPrimary
-                                )
-                                if (match.shortVirtue.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = match.shortVirtue,
-                                        fontSize = 12.sp,
-                                        color = TextSecondary
-                                    )
-                                }
+                                Text(match.dhikrText, fontSize = 15.sp, maxLines = 3, overflow = TextOverflow.Ellipsis, color = TextPrimary)
                             }
                         }
                     }
                 }
 
-                items(results, key = { "${it.categoryId}_${it.azkar.id}" }) { result ->
+                items(literalResults, key = { "lit_${it.categoryId}_${it.azkar.id}" }) { result ->
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -256,20 +216,9 @@ fun SearchScreen(
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = result.categoryName,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = PrimaryGold
-                            )
+                            Text(result.categoryName, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = PrimaryGold)
                             Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = result.azkar.text,
-                                fontSize = 16.sp,
-                                maxLines = 3,
-                                overflow = TextOverflow.Ellipsis,
-                                color = TextPrimary
-                            )
+                            Text(result.azkar.text, fontSize = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis, color = TextPrimary)
                         }
                     }
                 }

@@ -45,7 +45,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.NavController
-import com.nabdaldhikr.app.ui.components.AiModelManagerSheet
 import com.nabdaldhikr.app.ui.components.DhikrAiBottomSheet
 import com.nabdaldhikr.app.ui.components.GoldDivider
 import com.nabdaldhikr.app.ui.theme.*
@@ -86,7 +85,6 @@ fun AzkarDetailScreen(
     var fontScaleDelta by remember { mutableFloatStateOf(0f) }
     var showCompletionDialog by remember { mutableStateOf(false) }
     var showAiSheet by remember { mutableStateOf(false) }
-    var showModelManagerSheet by remember { mutableStateOf(false) }
 
     // تأثير النبض للزر
     var buttonScale by remember { mutableFloatStateOf(1f) }
@@ -465,18 +463,11 @@ fun AzkarDetailScreen(
             azkar = currentAzkar,
             allCategories = allCategories,
             aiViewModel = aiViewModel,
-            onOpenModelManager = {
+            onOpenNabdAiChat = {
                 showAiSheet = false
-                showModelManagerSheet = true
+                navController.navigate("nabd_ai")
             },
             onDismiss = { showAiSheet = false }
-        )
-    }
-
-    if (showModelManagerSheet) {
-        AiModelManagerSheet(
-            aiViewModel = aiViewModel,
-            onDismiss = { showModelManagerSheet = false }
         )
     }
 

@@ -47,42 +47,16 @@ data class OfflineDhikrMetadata(
     @SerializedName("keywords") val keywords: List<String> = emptyList()
 )
 
-data class AiAssetFile(
-    @SerializedName("filename") val filename: String = "",
-    @SerializedName("size_bytes") val sizeBytes: Long = 0L,
-    @SerializedName("sha256") val sha256: String = "",
-    @SerializedName("url") val url: String = ""
-)
-
-data class LanguagePackInfo(
-    @SerializedName("code") val code: String = "",
-    @SerializedName("native_name") val nativeName: String = "",
-    @SerializedName("english_name") val englishName: String = "",
-    @SerializedName("rtl") val rtl: Boolean = false,
-    @SerializedName("entry_count") val entryCount: Int = 0,
-    @SerializedName("vector_count") val vectorCount: Int = 0,
-    @SerializedName("vectors") val vectors: AiAssetFile = AiAssetFile(),
-    @SerializedName("dataset") val dataset: AiAssetFile = AiAssetFile()
-)
-
-data class AiManifest(
+data class GemmaManifest(
     @SerializedName("schema_version") val schemaVersion: Int = 1,
-    @SerializedName("release_tag") val releaseTag: String = "ai-v1.0.0",
-    @SerializedName("model_id") val modelId: String = "",
-    @SerializedName("embedding_dim") val embeddingDim: Int = 384,
-    @SerializedName("similarity_threshold") val similarityThreshold: Float = 0.65f,
-    @SerializedName("generated_at_utc") val generatedAtUtc: String = "",
-    @SerializedName("model") val model: AiAssetFile = AiAssetFile(),
-    @SerializedName("tokenizer") val tokenizer: AiAssetFile = AiAssetFile(),
-    @SerializedName("languages") val languages: List<LanguagePackInfo> = emptyList()
-)
-
-data class LanguageOption(
-    val code: String,
-    val nativeName: String,
-    val englishName: String,
-    val isRtl: Boolean,
-    val isAvailableInRelease: Boolean = false
+    @SerializedName("release_tag") val releaseTag: String = "gemma3-v1.0.0",
+    @SerializedName("model_name") val modelName: String = "Gemma 3 (270M) INT8",
+    @SerializedName("filename") val filename: String = "gemma3-270m-nabd.task",
+    @SerializedName("size_bytes") val sizeBytes: Long = 251_658_240L,
+    @SerializedName("sha256") val sha256: String = "",
+    @SerializedName("url") val url: String = "",
+    @SerializedName("min_ram_gb") val minRamGb: Float = 3.0f,
+    @SerializedName("min_storage_mb") val minStorageMb: Long = 450L
 )
 
 enum class DeviceCapabilityStatus {
@@ -98,63 +72,89 @@ data class HardwareCheckItem(
 )
 
 data class DeviceCapabilityReport(
+    val totalRamBytes: Long,
+    val totalRamGb: Double,
     val freeStorageMb: Long,
-    val totalRamMb: Long,
-    val availableRamMb: Long,
-    val cpuCores: Int,
+    val apiLevel: Int,
+    val is64BitArm: Boolean,
     val supportedAbis: List<String>,
     val isLowRamDevice: Boolean,
-    val isLowMemoryNow: Boolean,
     val checks: List<HardwareCheckItem>,
     val failedReasonsAr: List<String>,
     val status: DeviceCapabilityStatus,
-    val statusTitleAr: String,
+    val statusHeadlineAr: String,
     val statusDetailAr: String,
     val canDownload: Boolean
 )
 
-sealed interface AiDownloadState {
-    data object Idle : AiDownloadState
-    data object FetchingManifest : AiDownloadState
+sealed interface GemmaDownloadState {
+    data object Idle : GemmaDownloadState
+    data object FetchingManifest : GemmaDownloadState
     data class Downloading(
-        val stageLabel: String,
-        val currentFile: String,
         val progress: Float,
         val downloadedMb: Float,
         val totalMb: Float
-    ) : AiDownloadState
-    data class Verifying(val fileName: String) : AiDownloadState
-    data class Ready(val languageCode: String, val installedLanguages: Set<String>) : AiDownloadState
-    data class Error(val message: String, val canResume: Boolean) : AiDownloadState
+    ) : GemmaDownloadState
+    data object Verifying : GemmaDownloadState
+    data class Ready(val modelPath: String, val sizeMb: Float) : GemmaDownloadState
+    data class Error(val message: String, val canResume: Boolean) : GemmaDownloadState
 }
 
-data class SemanticMatch(
-    val dhikrId: Int,
-    val categoryId: String,
-    val categoryName: String,
-    val orderIndex: Int,
-    val dhikrText: String,
-    val shortVirtue: String,
-    val detailedExplanation: String,
-    val botAnswer: String,
-    val vocabulary: List<VocabEntry>,
-    val suggestedFollowups: List<String>,
-    val similarityScore: Float,
-    val usedNeuralEngine: Boolean
+data class DorarHadithResult(
+    val hadithText: String,
+    val narrator: String,
+    val scholar: String,
+    val sourceBook: String,
+    val numberOrPage: String,
+    val ruling: String
 )
 
-sealed interface AiQueryOutcome {
-    data class Match(
-        val bestMatch: SemanticMatch,
-        val alternatives: List<SemanticMatch>,
-        val latencyMs: Long
-    ) : AiQueryOutcome
-
-    data class BlockedOutOfScope(
-        val message: String,
-        val topScore: Float,
-        val latencyMs: Long
-    ) : AiQueryOutcome
-
-    data object NoData : AiQueryOutcome
+enum class NabdAiSourceType {
+    LOCAL_ADHKAR,
+    DORAR_VERIFIED,
+    INTERNET_REQUIRED,
+    FATWA_BLOCKED
 }
+
+data class LocalDhikrMatch(
+    val categoryId: String,
+    val categoryName: String,
+    val dhikrId: Int,
+    val indexInCategory: Int,
+    val dhikrText: String,
+    val source: String,
+    val hadithNumber: String,
+    val shortVirtue: String,
+    val detailedExplanation: String,
+    val vocabulary: List<VocabEntry>,
+    val suggestedFollowups: List<String>,
+    val botAnswer: String,
+    val repetition: Int,
+    val score: Float
+)
+
+data class NabdAiReply(
+    val answerText: String,
+    val sourceBadge: String,
+    val sourceType: NabdAiSourceType,
+    val linkedCategoryId: String? = null,
+    val linkedDhikrId: Int? = null,
+    val linkedDhikrIndex: Int = 0,
+    val matchedDhikrText: String? = null,
+    val usedGemma3: Boolean = false,
+    val latencyMs: Long = 0L
+)
+
+data class NabdAiChatMessage(
+    val id: Long,
+    val isUser: Boolean,
+    val text: String,
+    val sourceBadge: String? = null,
+    val sourceType: NabdAiSourceType? = null,
+    val linkedCategoryId: String? = null,
+    val linkedDhikrId: Int? = null,
+    val linkedDhikrIndex: Int = 0,
+    val matchedDhikrText: String? = null,
+    val usedGemma3: Boolean = false,
+    val latencyMs: Long = 0L
+)

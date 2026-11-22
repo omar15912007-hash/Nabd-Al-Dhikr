@@ -12,8 +12,8 @@
 # Updater Data Models
 -keep class com.nabdaldhikr.app.updater.** { *; }
 
-# Offline AI Data Models (Gson) & ONNX Runtime JNI
+# Nabd AI Data Models (Gson) & MediaPipe GenAI (Gemma 3 270M)
 -keep class com.nabdaldhikr.app.ai.** { *; }
--keep class ai.onnxruntime.** { *; }
--dontwarn ai.onnxruntime.**
+-keep class com.google.mediapipe.** { *; }
+-dontwarn com.google.mediapipe.**
 -keepattributes *Annotation*

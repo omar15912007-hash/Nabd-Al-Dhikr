@@ -7,25 +7,23 @@ import android.os.StatFs
 import java.util.Locale
 
 /**
- * Strict 5-point hardware compatibility inspector for Nabd Al-Dhikr offline ONNX AI.
+ * Strict hardware compatibility inspector for on-device Gemma 3 (270M) (~240MB file, ~400MB active RAM).
  *
- * Hard-blocks download (`canDownload = false`) whenever ANY mandatory requirement fails,
- * preventing OOM crashes, freezes, or wasted bandwidth on incompatible devices:
- *  1. Total RAM >= 2048 MB (2 GB) and not an Android Go / low-RAM device
- *  2. Currently Available RAM >= 300 MB and OS not in lowMemory state
- *  3. Free Internal Storage >= 250 MB (model + tokenizer + language pack + safe staging)
- *  4. CPU Cores >= 4
- *  5. Supported ARM ABI (`arm64-v8a` or `armeabi-v7a`) for ONNX Runtime NEON kernels
+ * Mandatory requirements (hard-blocks download if ANY check fails):
+ *  1. Total RAM >= 3.0 GB (`ActivityManager.MemoryInfo.totalMem >= 3L * 1024 * 1024 * 1024`)
+ *  2. Free Internal Storage >= 450 MB (`StatFs.availableBytes`)
+ *  3. Android OS >= 8.0 (`API >= 26`)
+ *  4. 64-bit ARM CPU (`arm64-v8a`)
  */
 object DeviceCapabilityChecker {
 
-    const val MIN_REQUIRED_STORAGE_MB: Long = 250L
-    const val MIN_REQUIRED_TOTAL_RAM_MB: Long = 2048L
-    const val MIN_REQUIRED_AVAIL_RAM_MB: Long = 300L
-    const val MIN_REQUIRED_CPU_CORES: Int = 4
+    const val MIN_REQUIRED_RAM_BYTES: Long = 3L * 1024L * 1024L * 1024L // 3.0 GB
+    const val MIN_REQUIRED_STORAGE_MB: Long = 450L
+    const val MIN_REQUIRED_API_LEVEL: Int = Build.VERSION_CODES.O // API 26 (Android 8.0)
 
     private const val BYTES_PER_MB: Long = 1024L * 1024L
-    private val SUPPORTED_AI_ABIS = setOf("arm64-v8a", "armeabi-v7a")
+    private const val BYTES_PER_GB: Double = 1024.0 * 1024.0 * 1024.0
+    private const val REQUIRED_ABI: String = "arm64-v8a"
 
     fun inspect(context: Context): DeviceCapabilityReport {
         val freeStorageMb = readFreeInternalStorageMb(context)
@@ -33,111 +31,103 @@ object DeviceCapabilityChecker {
         val memoryInfo = ActivityManager.MemoryInfo()
         activityManager?.getMemoryInfo(memoryInfo)
 
-        val totalRamMb = memoryInfo.totalMem / BYTES_PER_MB
-        val availableRamMb = memoryInfo.availMem / BYTES_PER_MB
-        val isLowRam = activityManager?.isLowRamDevice ?: true
-        val isLowMemoryNow = memoryInfo.lowMemory
-        val cpuCores = Runtime.getRuntime().availableProcessors()
+        val totalRamBytes = memoryInfo.totalMem
+        val isLowRam = activityManager?.isLowRamDevice ?: false
         val abis = Build.SUPPORTED_ABIS?.toList().orEmpty()
+        val abis64 = Build.SUPPORTED_64_BIT_ABIS?.toList().orEmpty()
+        val is64BitArm = abis64.contains(REQUIRED_ABI) || abis.contains(REQUIRED_ABI)
 
         return evaluateCapability(
+            totalRamBytes = totalRamBytes,
             freeStorageMb = freeStorageMb,
-            totalRamMb = totalRamMb,
-            availableRamMb = availableRamMb,
-            cpuCores = cpuCores,
+            apiLevel = Build.VERSION.SDK_INT,
+            is64BitArm = is64BitArm,
             supportedAbis = abis,
-            isLowRamDevice = isLowRam,
-            isLowMemoryNow = isLowMemoryNow
+            isLowRamDevice = isLowRam
         )
     }
 
     /**
-     * Pure deterministic evaluator separated from Android framework APIs for strict unit testing.
-     * Any single failed check strictly sets `canDownload = false` (impossible to download).
+     * Pure deterministic evaluator separated from Android APIs for strict unit testing.
      */
     fun evaluateCapability(
+        totalRamBytes: Long,
         freeStorageMb: Long,
-        totalRamMb: Long,
-        availableRamMb: Long,
-        cpuCores: Int,
+        apiLevel: Int,
+        is64BitArm: Boolean,
         supportedAbis: List<String>,
-        isLowRamDevice: Boolean,
-        isLowMemoryNow: Boolean
+        isLowRamDevice: Boolean = false
     ): DeviceCapabilityReport {
-        val ramTotalOk = totalRamMb >= MIN_REQUIRED_TOTAL_RAM_MB && !isLowRamDevice
-        val ramAvailOk = availableRamMb >= MIN_REQUIRED_AVAIL_RAM_MB && !isLowMemoryNow
+        val totalRamGb = totalRamBytes / BYTES_PER_GB
+        val ramGbLabel = String.format(Locale.US, "%.1f", totalRamGb)
+
+        val ramOk = totalRamBytes >= MIN_REQUIRED_RAM_BYTES && !isLowRamDevice
         val storageOk = freeStorageMb >= MIN_REQUIRED_STORAGE_MB
-        val coresOk = cpuCores >= MIN_REQUIRED_CPU_CORES
-        val abiOk = supportedAbis.any { it in SUPPORTED_AI_ABIS }
+        val apiOk = apiLevel >= MIN_REQUIRED_API_LEVEL
+        val cpuOk = is64BitArm
 
         val checks = listOf(
             HardwareCheckItem(
                 labelAr = "الذاكرة العشوائية (RAM)",
-                actualValueAr = "${formatGb(totalRamMb)} جيجابايت" + if (isLowRamDevice) " (نظام محدود)" else "",
-                requirementAr = "2.0 جيجابايت فأكثر",
-                passed = ramTotalOk
+                actualValueAr = "$ramGbLabel جيجا" + if (isLowRamDevice) " (محدودة)" else "",
+                requirementAr = "3.0 جيجا فأكثر",
+                passed = ramOk
             ),
             HardwareCheckItem(
-                labelAr = "الذاكرة المتاحة حالياً",
-                actualValueAr = "$availableRamMb ميجابايت",
-                requirementAr = "$MIN_REQUIRED_AVAIL_RAM_MB ميجابايت فأكثر",
-                passed = ramAvailOk
-            ),
-            HardwareCheckItem(
-                labelAr = "المساحة التخزينية الحرة",
-                actualValueAr = "$freeStorageMb ميجابايت",
-                requirementAr = "$MIN_REQUIRED_STORAGE_MB ميجابايت فأكثر",
+                labelAr = "المساحة التخزينية المتاحة",
+                actualValueAr = "$freeStorageMb ميجا",
+                requirementAr = "$MIN_REQUIRED_STORAGE_MB ميجا فأكثر",
                 passed = storageOk
             ),
             HardwareCheckItem(
-                labelAr = "أنوية المعالج (CPU)",
-                actualValueAr = "$cpuCores أنوية",
-                requirementAr = "$MIN_REQUIRED_CPU_CORES أنوية فأكثر",
-                passed = coresOk
+                labelAr = "نظام التشغيل (Android)",
+                actualValueAr = "API $apiLevel",
+                requirementAr = "Android 8.0+ (API 26)",
+                passed = apiOk
             ),
             HardwareCheckItem(
-                labelAr = "معمارية المعالج (ARM)",
-                actualValueAr = supportedAbis.firstOrNull() ?: "غير مدعومة",
-                requirementAr = "arm64-v8a أو armeabi-v7a",
-                passed = abiOk
+                labelAr = "معالج 64-bit",
+                actualValueAr = if (cpuOk) REQUIRED_ABI else (supportedAbis.firstOrNull() ?: "32-bit"),
+                requirementAr = REQUIRED_ABI,
+                passed = cpuOk
             )
         )
 
         val failedReasons = checks
             .filterNot { it.passed }
-            .map { "${it.labelAr}: المتاح ${it.actualValueAr} (المطلوب ${it.requirementAr})" }
+            .map { "${it.labelAr}: ${it.actualValueAr} (المطلوب ${it.requirementAr})" }
 
         if (failedReasons.isNotEmpty()) {
             return DeviceCapabilityReport(
+                totalRamBytes = totalRamBytes,
+                totalRamGb = totalRamGb,
                 freeStorageMb = freeStorageMb,
-                totalRamMb = totalRamMb,
-                availableRamMb = availableRamMb,
-                cpuCores = cpuCores,
+                apiLevel = apiLevel,
+                is64BitArm = is64BitArm,
                 supportedAbis = supportedAbis,
                 isLowRamDevice = isLowRamDevice,
-                isLowMemoryNow = isLowMemoryNow,
                 checks = checks,
                 failedReasonsAr = failedReasons,
                 status = DeviceCapabilityStatus.INCOMPATIBLE,
-                statusTitleAr = "غير متوافق — التحميل ممنوع نهائياً",
-                statusDetailAr = "تم فحص عتاد جهازك وتبيّن أنه لا يدعم تشغيل نموذج الذكاء الاصطناعي بأمان، لذا تم قفل خيار التحميل تلقائياً لحماية جهازك من التوقف أو البطء الشديد.",
+                statusHeadlineAr = "عذراً، جهازك لا يستوفي الحد الأدنى (3 جيجا رام و 450 ميجا مساحة)",
+                statusDetailAr = "تم منع تحميل نموذج Gemma 3 (270M) لحماية جهازك من البطء أو التوقف، بينما تعمل جميع الأذكار والبحث المحلي والدرر السنية بسلاسة كاملة.",
                 canDownload = false
             )
         }
 
         return DeviceCapabilityReport(
+            totalRamBytes = totalRamBytes,
+            totalRamGb = totalRamGb,
             freeStorageMb = freeStorageMb,
-            totalRamMb = totalRamMb,
-            availableRamMb = availableRamMb,
-            cpuCores = cpuCores,
+            apiLevel = apiLevel,
+            is64BitArm = is64BitArm,
             supportedAbis = supportedAbis,
             isLowRamDevice = isLowRamDevice,
-            isLowMemoryNow = isLowMemoryNow,
             checks = checks,
             failedReasonsAr = emptyList(),
             status = DeviceCapabilityStatus.COMPATIBLE,
-            statusTitleAr = "متوافق تماماً مع جهازك",
-            statusDetailAr = "اجتاز جهازك جميع فحوصات العتاد الخمسة بنجاح؛ يمكنك الآن تحميل الذكاء الاصطناعي وتشغيله بدون إنترنت داخل التطبيق.",
+            statusHeadlineAr = "جهازك متوافق تماماً ✅ (الرامات: $ramGbLabel جيجا | المساحة المتاحة: $freeStorageMb ميجا)",
+            statusDetailAr = "يمكنك تحميل نموذج Gemma 3 (270M) (~240 ميجا) مجاناً من GitHub Releases، ويُحرّر ذاكرة التشغيل (~400 ميجا) تلقائياً فور إغلاق المحادثة.",
             canDownload = true
         )
     }
@@ -149,10 +139,5 @@ object DeviceCapabilityChecker {
         } catch (_: Exception) {
             0L
         }
-    }
-
-    private fun formatGb(megabytes: Long): String {
-        val gb = megabytes / 1024.0
-        return String.format(Locale.US, "%.1f", gb)
     }
 }

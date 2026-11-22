@@ -15,7 +15,8 @@ import com.nabdaldhikr.app.ui.screens.AzkarDetailScreen
 import com.nabdaldhikr.app.ui.screens.AzkarListScreen
 import com.nabdaldhikr.app.ui.screens.FavoritesScreen
 import com.nabdaldhikr.app.ui.screens.HomeScreen
-import com.nabdaldhikr.app.ui.screens.QiblaCompassScreen
+import com.nabdaldhikr.app.ui.screens.NabdAiChatScreen
+import com.nabdaldhikr.app.ui.screens.QiblaScreen
 import com.nabdaldhikr.app.ui.screens.SearchScreen
 import com.nabdaldhikr.app.ui.screens.SettingsScreen
 import com.nabdaldhikr.app.ui.screens.SplashScreen
@@ -31,7 +32,8 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
     val azkarViewModel: AzkarViewModel = viewModel()
     val tasbihViewModel: TasbihViewModel = viewModel()
     val aiAssistantViewModel: AiAssistantViewModel = viewModel()
-    
+    val vibrationEnabled by settingsViewModel.vibrationEnabled.collectAsState()
+
     NavHost(
         navController = navController,
         startDestination = "splash",
@@ -56,6 +58,12 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
         }
         composable("home") {
             HomeScreen(
+                navController = navController,
+                azkarViewModel = azkarViewModel
+            )
+        }
+        composable("nabd_ai") {
+            NabdAiChatScreen(
                 navController = navController,
                 azkarViewModel = azkarViewModel,
                 aiViewModel = aiAssistantViewModel
@@ -89,8 +97,9 @@ fun AppNavigation(settingsViewModel: SettingsViewModel) {
             )
         }
         composable("qibla") {
-            QiblaCompassScreen(
-                onBackClick = { navController.popBackStack() }
+            QiblaScreen(
+                navController = navController,
+                vibrationEnabled = vibrationEnabled
             )
         }
         composable("settings") {

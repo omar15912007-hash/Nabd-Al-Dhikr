@@ -5,6 +5,7 @@ import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -192,5 +193,75 @@ object QiblaMathUtils {
      */
     fun normalize360(degrees: Double): Double {
         return (degrees % 360.0 + 360.0) % 360.0
+    }
+
+    /**
+     * استخراج زاوية الاتجاه المغناطيسي الحقيقي [0, 360) مباشرةً من مصفوفة الدوران العالمية (ENU)
+     * بدون أي قفز 180° أو Gimbal Lock:
+     *
+     * في إحداثيات أندرويد (V_world = R * V_device، حيث الصف 0 = شرق، الصف 1 = شمال، الصف 2 = أعلى):
+     * - الحافة العلوية للهاتف (+Y_device) في المستوى الأفقي = (R[1], R[4])
+     * - عدسة الكاميرا الخلفية (-Z_device) في المستوى الأفقي = (-R[2], -R[5])
+     *
+     * @param rotationMatrix مصفوفة دوران 3x3 (طول 9) من TYPE_ROTATION_VECTOR أو Accel+Mag
+     * @param isCameraMode true في وضع الكاميرا الخلفية (AR)، false في وضع البوصلة الأفقية
+     * @return زاوية الاتجاه باتجاه الشمال المغناطيسي [0, 360)
+     */
+    fun extractHorizontalHeading(
+        rotationMatrix: FloatArray,
+        isCameraMode: Boolean
+    ): Float {
+        if (rotationMatrix.size < 9) return 0f
+
+        val topEast = rotationMatrix[1].toDouble()
+        val topNorth = rotationMatrix[4].toDouble()
+        val camEast = -rotationMatrix[2].toDouble()
+        val camNorth = -rotationMatrix[5].toDouble()
+
+        val hTop = hypot(topEast, topNorth)
+        val hCam = hypot(camEast, camNorth)
+
+        val east: Double
+        val north: Double
+
+        if (isCameraMode) {
+            // في وضع الكاميرا (AR): نعتمد مباشرةً على المحور البصري للعدسة الخلفية (-Z_device)
+            // ولا ننتقل إلى (+Y_device) إلا إذا وجّه المستخدم الكاميرا عمودياً تماماً للسقف أو الأرض
+            if (hCam >= 0.15) {
+                east = camEast
+                north = camNorth
+            } else {
+                east = topEast
+                north = topNorth
+            }
+        } else {
+            // في وضع البوصلة: دمج متجهي سلس بين الحافة العلوية (+Y) والكاميرا الأمامية (-Z)
+            // يمنع تماماً أي انقلاب 180° عند رفع الهاتف من الوضع الأفقي إلى العمودي
+            val totalWeight = hTop + hCam
+            if (totalWeight < 1e-6) return 0f
+            east = (hTop * topEast + hCam * camEast) / totalWeight
+            north = (hTop * topNorth + hCam * camNorth) / totalWeight
+        }
+
+        val azimuthDeg = Math.toDegrees(atan2(east, north))
+        return normalize360(azimuthDeg).toFloat()
+    }
+
+    /**
+     * استخراج زاوية ارتفاع عدسة الكاميرا الخلفية (-Z_device) عن الأفق بالدرجات [-90, +90]:
+     * 0° = موجهة تماماً للأفق، +90° = للسماء، -90° = للأرض.
+     */
+    fun extractCameraElevationDegrees(rotationMatrix: FloatArray): Float {
+        if (rotationMatrix.size < 9) return 0f
+        val camUp = (-rotationMatrix[8]).coerceIn(-1f, 1f).toDouble()
+        return Math.toDegrees(asin(camUp)).toFloat()
+    }
+
+    /**
+     * كشف التداخل المغناطيسي (معادن، سماعات، مغناطيس حافظات الهاتف):
+     * شدة المجال المغناطيسي الطبيعي للأرض تتراوح بين 25 و 65 ميكروتسلا (µT).
+     */
+    fun isMagneticFieldInterfered(magnitudeMicroTesla: Float): Boolean {
+        return magnitudeMicroTesla < 20f || magnitudeMicroTesla > 75f
     }
 }
