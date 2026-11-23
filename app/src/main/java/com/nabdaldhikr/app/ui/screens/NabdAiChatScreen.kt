@@ -96,13 +96,17 @@ fun NabdAiChatScreen(
                                 color = PillGold
                             )
                             Text(
-                                text = if (isGemmaInstalled) {
-                                    "Gemma 3 (270M) نشط • محلي + الدرر السنية"
-                                } else {
-                                    "أذكار محلية بدون إنترنت + تحقق الدرر السنية"
+                                text = when {
+                                    isGemmaInstalled && !isAiUpdateAvailable ->
+                                        "وضع الذكاء الاصطناعي المعمّق (Gemma 3 نشط ✅)"
+                                    isGemmaInstalled && isAiUpdateAvailable ->
+                                        "يتوفر تحديث لنموذج Gemma 3 (${ModelDownloadManager.GEMMA_RELEASE_TAG}) • المحرك المدمج نشط"
+                                    else ->
+                                        "الوضع الأساسي المدمج (يعمل من موسوعة الأذكار داخل التطبيق)"
                                 },
-                                fontSize = 11.sp,
-                                color = TextSecondary
+                                fontSize = 10.5.sp,
+                                color = if (isGemmaInstalled && !isAiUpdateAvailable) CompletedGreen else TextSecondary,
+                                maxLines = 1
                             )
                         }
                     }
@@ -245,6 +249,42 @@ fun NabdAiChatScreen(
                     onCancel = { aiViewModel.cancelGemmaDownload() },
                     onDelete = { aiViewModel.deleteGemmaModel() },
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+
+            // Clear Mode Pill indicating built-in fast engine vs downloaded Gemma 3 model
+            val modePillBg = when {
+                isGemmaInstalled && !isAiUpdateAvailable -> Color(0xFF163325)
+                isGemmaInstalled && isAiUpdateAvailable -> Color(0xFF2B2412)
+                else -> AiSheetBg
+            }
+            val modePillBorder = when {
+                isGemmaInstalled && !isAiUpdateAvailable -> CompletedGreen.copy(alpha = 0.6f)
+                else -> PillGold.copy(alpha = 0.45f)
+            }
+            val modePillText = when {
+                isGemmaInstalled && !isAiUpdateAvailable ->
+                    "وضع الذكاء الاصطناعي المعمّق (Gemma 3 نشط ✅)"
+                isGemmaInstalled && isAiUpdateAvailable ->
+                    "تنبيه: نسختك من النموذج قديمة — حدّث إلى ${ModelDownloadManager.GEMMA_RELEASE_TAG}، والمحرك المدمج يرد عليك بأمان"
+                else ->
+                    "الوضع الأساسي المدمج (يرد من موسوعة الأذكار داخل التطبيق بدون تحميل النموذج الإضافي)"
+            }
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp)
+                    .clickable { showModelCard = true },
+                shape = RoundedCornerShape(12.dp),
+                color = modePillBg,
+                border = BorderStroke(1.dp, modePillBorder)
+            ) {
+                Text(
+                    text = modePillText,
+                    color = if (isGemmaInstalled && !isAiUpdateAvailable) CompletedGreen else PillGold,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
                 )
             }
 

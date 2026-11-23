@@ -6,6 +6,10 @@ import com.nabdaldhikr.app.util.QiblaMathUtils
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
+import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -387,9 +391,91 @@ class OfflineAiEngineTest {
         assertTrue(QiblaMathUtils.isMagneticFieldInterfered(120f))
         assertTrue(QiblaMathUtils.isMagneticFieldInterfered(10f))
 
-        // Verify Gemma 3 release tag targets ai-v1.0.3
-        assertTrue(ModelDownloadManager.DEFAULT_MANIFEST_URL.contains("/ai-v1.0.3/"))
-        assertTrue(ModelDownloadManager.DEFAULT_DIRECT_MODEL_URL.contains("/ai-v1.0.3/"))
+        // Verify Gemma 3 release tag targets ai-v1.0.4
+        assertEquals("ai-v1.0.4", ModelDownloadManager.GEMMA_RELEASE_TAG)
+        assertTrue(ModelDownloadManager.DEFAULT_MANIFEST_URL.contains("/ai-v1.0.4/"))
+        assertTrue(ModelDownloadManager.DEFAULT_DIRECT_MODEL_URL.contains("/ai-v1.0.4/"))
+    }
+
+    // =========================================================================
+    // 6. TaskBundleInspector & NativeCrashCircuitBreaker Safety Tests
+    // =========================================================================
+
+    @Test
+    fun gemmaSafety_rejectsLegacySinglePrefill256AndTripsCircuitBreakerOnAbort() {
+        val tempDir = File(System.getProperty("java.io.tmpdir"), "nabd_gemma_test_${System.nanoTime()}")
+        tempDir.mkdirs()
+        try {
+            val legacyFile = File(tempDir, "legacy.task")
+            ZipOutputStream(FileOutputStream(legacyFile)).use { zip ->
+                zip.putNextEntry(ZipEntry("TF_LITE_PREFILL_DECODE"))
+                zip.write("header_decode_prefill_256_tokens_input_pos_mask_logits".toByteArray(Charsets.ISO_8859_1))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("TOKENIZER_MODEL"))
+                zip.write(ByteArray(32))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("METADATA"))
+                zip.write(ByteArray(16))
+                zip.closeEntry()
+            }
+            assertEquals(
+                TaskBundleStatus.LEGACY_SINGLE_PREFILL_256,
+                TaskBundleInspector.inspect(legacyFile, minBytes = 10L)
+            )
+
+            val multiPrefillFile = File(tempDir, "valid_multi.task")
+            ZipOutputStream(FileOutputStream(multiPrefillFile)).use { zip ->
+                zip.putNextEntry(ZipEntry("TF_LITE_PREFILL_DECODE"))
+                zip.write("header_decode_prefill_64_prefill_256_prefill_512_prefill_1024".toByteArray(Charsets.ISO_8859_1))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("TOKENIZER_MODEL"))
+                zip.write(ByteArray(32))
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("METADATA"))
+                zip.write(ByteArray(16))
+                zip.closeEntry()
+            }
+            assertEquals(
+                TaskBundleStatus.VALID_MULTI_PREFILL,
+                TaskBundleInspector.inspect(multiPrefillFile, minBytes = 10L)
+            )
+
+            val store = InMemoryGuardStore()
+            val breaker = NativeCrashCircuitBreaker(store)
+            val sig = NativeCrashCircuitBreaker.fileSignature(multiPrefillFile)
+            assertFalse(breaker.isBlocked(sig))
+
+            // Simulate native process abort before markNativeCallSucceeded runs
+            breaker.markNativeCallStarted(sig)
+            val restartedBreaker = NativeCrashCircuitBreaker(store)
+            assertTrue("Should block exact crashing file after simulated SIGABRT", restartedBreaker.isBlocked(sig))
+
+            // Clean new download changes file length -> different signature is NOT blocked
+            multiPrefillFile.appendBytes(byteArrayOf(1, 2, 3, 4))
+            val newSig = NativeCrashCircuitBreaker.fileSignature(multiPrefillFile)
+            assertFalse(restartedBreaker.isBlocked(newSig))
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    private class InMemoryGuardStore : NativeCrashCircuitBreaker.KeyValueStore {
+        private var inFlight = false
+        private val strings = mutableMapOf<String, String>()
+
+        override fun getBoolean(key: String, default: Boolean): Boolean = inFlight
+        override fun getString(key: String, default: String): String = strings[key] ?: default
+        override fun commitValues(
+            inFlight: Boolean,
+            inFlightSignature: String,
+            blockedSignature: String?,
+            verifiedSignature: String?
+        ) {
+            this.inFlight = inFlight
+            strings["gemma_native_in_flight_sig"] = inFlightSignature
+            if (blockedSignature != null) strings["gemma_native_blocked_sig"] = blockedSignature
+            if (verifiedSignature != null) strings["gemma_native_verified_sig"] = verifiedSignature
+        }
     }
 
     // =========================================================================

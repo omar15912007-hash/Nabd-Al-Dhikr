@@ -6,11 +6,11 @@ on:
       release_tag:
         description: 'Primary GitHub Release tag for Fine-Tuned Gemma 3 (270M)'
         required: true
-        default: 'ai-v1.0.3'
+        default: 'ai-v1.0.4'
       mirror_tags:
-        description: 'Optional comma-separated compatibility tags (e.g. ai-v1.0.2,gemma3-v1.0.0)'
+        description: 'Optional comma-separated compatibility tags (e.g. ai-v1.0.3,ai-v1.0.2,gemma3-v1.0.0)'
         required: false
-        default: 'ai-v1.0.2,gemma3-v1.0.0'
+        default: 'ai-v1.0.3,ai-v1.0.2,gemma3-v1.0.0'
       hf_model_id:
         description: 'Public HuggingFace Gemma 3 270M repo to fine-tune and convert when model_download_url is empty'
         required: false
@@ -94,15 +94,19 @@ jobs:
                 --lr 2e-5
             fi
 
-            echo "Converting fine-tuned Gemma 3 checkpoint to INT8 TFLite..."
+            echo "Converting fine-tuned Gemma 3 checkpoint to INT8 TFLite (multi-prefill buckets + CPU KV cache)..."
             venv_convert/bin/python -m litert_torch.generative.examples.gemma3.convert_gemma3_to_tflite \
               --model_size=270m \
               --quantize=dynamic_int8 \
               --checkpoint_path=gemma_ckpt \
               --output_path=gemma_tflite \
               --output_name_prefix=gemma3-270m-nabd \
+              --prefill_seq_lens=64 \
+              --prefill_seq_lens=128 \
               --prefill_seq_lens=256 \
-              --kv_cache_max_len=1024 \
+              --prefill_seq_lens=512 \
+              --prefill_seq_lens=1024 \
+              --kv_cache_max_len=1280 \
               --mask_as_input=True \
               --transpose_kv_cache=True
 
@@ -115,6 +119,28 @@ jobs:
             echo "Converted TFLite model: $TFLITE_FILE"
             ls -lh "$TFLITE_FILE"
 
+            echo "Verifying TFLite signature defs (prefill_64..prefill_1024 + decode)..."
+            TFLITE_MODEL="$TFLITE_FILE" venv_convert/bin/python - <<'PYEOF'
+          import os
+          import tensorflow as tf
+
+          interp = tf.lite.Interpreter(model_path=os.environ["TFLITE_MODEL"])
+          sigs = sorted(interp.get_signature_list().keys())
+          print("Discovered TFLite signatures:", sigs)
+          required = [
+              "prefill_64",
+              "prefill_128",
+              "prefill_256",
+              "prefill_512",
+              "prefill_1024",
+              "decode",
+          ]
+          missing = [s for s in required if s not in sigs]
+          if missing:
+              raise SystemExit(f"ERROR: Missing required TFLite signatures: {missing}")
+          print("All required multi-prefill & decode signatures verified successfully.")
+          PYEOF
+
             # Bundle .tflite + tokenizer.model into a single MediaPipe .task file (isolated venv)
             python3 -m venv venv_bundle
             venv_bundle/bin/pip install --upgrade pip
@@ -122,18 +148,25 @@ jobs:
 
             TFLITE_MODEL="$TFLITE_FILE" venv_bundle/bin/python - <<'PYEOF'
           import os
+          import zipfile
           from mediapipe.tasks.python.genai import bundler
 
+          output_path = "gemma_dist/gemma3-270m-nabd.task"
           config = bundler.BundleConfig(
               tflite_model=os.environ["TFLITE_MODEL"],
               tokenizer_model="gemma_ckpt/tokenizer.model",
               start_token="<bos>",
               stop_tokens=["<eos>", "<end_of_turn>"],
-              output_filename="gemma_dist/gemma3-270m-nabd.task",
+              output_filename=output_path,
               enable_bytes_to_unicode_mapping=False,
           )
           bundler.create_bundle(config)
-          print("Created fine-tuned MediaPipe .task bundle successfully.")
+          with zipfile.ZipFile(output_path, "r") as zf:
+              names = set(zf.namelist())
+          required_entries = {"TF_LITE_PREFILL_DECODE", "TOKENIZER_MODEL", "METADATA"}
+          if not required_entries.issubset(names):
+              raise SystemExit(f"ERROR: Missing entries in .task bundle: {required_entries - names}")
+          print("Created & verified MediaPipe .task bundle:", sorted(names))
           PYEOF
           fi
 
@@ -147,7 +180,7 @@ jobs:
       - name: Generate SHA-256 Manifest & Publish to GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.release_tag || 'ai-v1.0.3' }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag || 'ai-v1.0.4' }}
           MIRROR_TAGS: ${{ github.event.inputs.mirror_tags }}
         run: |
           python3 ai_pipeline/publish_gemma3_release.py \

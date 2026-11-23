@@ -33,7 +33,7 @@ class ModelDownloadManager(
     companion object {
         private const val GITHUB_OWNER = "omar15912007-hash"
         private const val GITHUB_REPO = "Nabd-Al-Dhikr"
-        const val GEMMA_RELEASE_TAG = "ai-v1.0.3"
+        const val GEMMA_RELEASE_TAG = "ai-v1.0.4"
 
         const val GEMMA_MODEL_FILENAME = "gemma3-270m-nabd.task"
         private const val INSTALLED_TAG_FILENAME = "installed_tag.txt"
@@ -73,12 +73,23 @@ class ModelDownloadManager(
     }
 
     /**
-     * Returns true when a previous AI model (e.g., ai-v1.0.2) is already downloaded
-     * and the newer fine-tuned release (ai-v1.0.3) should be offered as an AI update.
+     * Returns true when a previous AI model (e.g., ai-v1.0.2 / ai-v1.0.3) is already downloaded
+     * and the newer fixed fine-tuned release (ai-v1.0.4) should be offered as an AI update.
      */
     fun isUpdateAvailable(): Boolean {
         if (!isGemmaInstalled()) return false
         return installedReleaseTag() != GEMMA_RELEASE_TAG
+    }
+
+    /**
+     * Detects older or crash-prone `.task` bundles (e.g., single-prefill `prefill_256` from
+     * ai-v1.0.2/ai-v1.0.3 or mismatched release tag) so the app auto-prompts replacement.
+     */
+    fun isLegacyIncompatibleModelInstalled(): Boolean {
+        val file = modelFile()
+        if (!file.isFile || file.length() <= 1_000_000L) return false
+        return installedReleaseTag() != GEMMA_RELEASE_TAG ||
+            TaskBundleInspector.inspect(file) == TaskBundleStatus.LEGACY_SINGLE_PREFILL_256
     }
 
     fun isGemmaInstalled(): Boolean = modelFile().isFile && modelFile().length() > 1_000_000L
@@ -150,9 +161,16 @@ class ModelDownloadManager(
                 return@withContext Result.success(destination)
             }
 
-            // Force fresh download when upgrading from an older model tag (e.g. ai-v1.0.2 -> ai-v1.0.3)
-            if (!isFileValid(destination, manifest.sha256) && destination.exists()) {
-                destination.delete()
+            // Force fresh download when upgrading from an older model tag or legacy incompatible file
+            val partFile = File(destination.parentFile, "${destination.name}.part")
+            val isSameVerifiedTag = installedReleaseTag() == GEMMA_RELEASE_TAG &&
+                isFileValid(destination, manifest.sha256) &&
+                TaskBundleInspector.inspect(destination) == TaskBundleStatus.VALID_MULTI_PREFILL
+            if (!isSameVerifiedTag) {
+                if (destination.exists()) destination.delete()
+                if (installedReleaseTag() != GEMMA_RELEASE_TAG && partFile.exists()) {
+                    partFile.delete()
+                }
             }
 
             downloadResumable(

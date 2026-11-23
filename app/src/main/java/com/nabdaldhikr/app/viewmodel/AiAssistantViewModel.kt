@@ -48,7 +48,9 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
     private val _isGemmaInstalled = MutableStateFlow(downloadManager.isGemmaInstalled())
     val isGemmaInstalled: StateFlow<Boolean> = _isGemmaInstalled.asStateFlow()
 
-    private val _isAiUpdateAvailable = MutableStateFlow(downloadManager.isUpdateAvailable())
+    private val _isAiUpdateAvailable = MutableStateFlow(
+        downloadManager.isUpdateAvailable() || downloadManager.isLegacyIncompatibleModelInstalled()
+    )
     val isAiUpdateAvailable: StateFlow<Boolean> = _isAiUpdateAvailable.asStateFlow()
 
     private val _offlineMetadata = MutableStateFlow<Map<String, OfflineDhikrMetadata>>(emptyMap())
@@ -62,9 +64,10 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
                 id = 0L,
                 isUser = false,
                 text = "أهلاً بك في «نبض AI» ✨\n" +
-                    "اسألني عن أي ذكر مثل «أذكار الصباح» أو حالتك الشعورية مثل «قلقان» أو «نوم» أو «سفر» وسأجيبك فوراً بدون إنترنت، " +
-                    "وللتحقق من صحة حديث نادر عبر موسوعة الدرر السنية يُستخدم الاتصال بالإنترنت تلقائياً. (بدون فتاوى فقهية).",
-                sourceBadge = "مساعد الأذكار الموثّقة • مجاني بالكامل",
+                    "• قبل تحميل النموذج الإضافي: يعمل المساعد فوراً عبر «المحرك الأساسي المدمج» داخل التطبيق للرد على الأذكار، المشاعر، ومعاني الكلمات بدون إنترنت (والدرر السنية عند الاتصال).\n" +
+                    "• بعد تحميل نموذج Gemma 3 (${ModelDownloadManager.GEMMA_RELEASE_TAG}): يتم تفعيل التوليد الذكي المعمّق على جهازك بدون إنترنت.\n\n" +
+                    "اسألني عن أي ذكر مثل «أذكار الصباح» أو «أنا زعلان» أو «أقوله كام مرة؟» وسأجيبك فوراً.",
+                sourceBadge = "المحرك المدمج + Gemma 3 • مجاني بالكامل",
                 sourceType = NabdAiSourceType.LOCAL_ADHKAR
             )
         )
@@ -97,7 +100,8 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
     fun refreshCapability() {
         _capabilityReport.value = DeviceCapabilityChecker.inspect(getApplication())
         _isGemmaInstalled.value = downloadManager.isGemmaInstalled()
-        _isAiUpdateAvailable.value = downloadManager.isUpdateAvailable()
+        _isAiUpdateAvailable.value =
+            downloadManager.isUpdateAvailable() || downloadManager.isLegacyIncompatibleModelInstalled()
     }
 
     fun isOnlineNow(): Boolean = connectivityChecker.isOnline()

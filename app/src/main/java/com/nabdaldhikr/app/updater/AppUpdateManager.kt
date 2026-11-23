@@ -1,10 +1,13 @@
 package com.nabdaldhikr.app.updater
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -206,6 +209,7 @@ object AppUpdateManager {
     suspend fun downloadApk(
         context: Context,
         downloadUrl: String,
+        versionName: String = "",
         onProgress: (progress: Float, downloadedMb: Float, totalMb: Float) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
         val updateDir = context.getExternalFilesDir(null) ?: context.filesDir
@@ -306,6 +310,9 @@ object AppUpdateManager {
                 partFile.copyTo(targetFile, overwrite = true)
                 partFile.delete()
             }
+
+            val publicName = if (versionName.isNotBlank()) "NabdAlDhikr-v$versionName.apk" else "NabdAlDhikr.apk"
+            saveCopyToPublicDownloads(context, targetFile, publicName)
 
             Result.success(targetFile)
         } catch (ce: CancellationException) {
@@ -424,6 +431,47 @@ object AppUpdateManager {
             context.startActivity(installIntent)
             true
         } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Saves an accessible copy of the verified APK into public `Downloads` (Android 10+ scoped storage)
+     * so if an older build with an incompatible signing certificate must be uninstalled once first,
+     * the user already has the installer ready locally in Downloads.
+     */
+    fun saveCopyToPublicDownloads(context: Context, sourceApk: File, displayName: String): Boolean {
+        if (!sourceApk.isFile) return false
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+
+        return try {
+            val resolver = context.contentResolver
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            resolver.delete(
+                collection,
+                "${MediaStore.Downloads.DISPLAY_NAME} = ?",
+                arrayOf(displayName)
+            )
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                put(MediaStore.Downloads.MIME_TYPE, "application/vnd.android.package-archive")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val itemUri = resolver.insert(collection, values) ?: return false
+            resolver.openOutputStream(itemUri)?.use { output ->
+                FileInputStream(sourceApk).use { input ->
+                    input.copyTo(output, bufferSize = 32 * 1024)
+                }
+            } ?: run {
+                resolver.delete(itemUri, null, null)
+                return false
+            }
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(itemUri, values, null, null)
+            true
+        } catch (_: Throwable) {
             false
         }
     }
@@ -615,7 +663,7 @@ fun AppUpdateDialog(
                                 fontSize = 12.5.sp
                             )
                             Text(
-                                text = "تم توحيد توقيع التطبيق الدائم بدءاً من v1.0.6 حتى لا يفشل التحديث مستقبلاً. إذا ظهر لك «التطبيق غير مثبّت»: حمّل النسخة من المتصفح بالأسفل، ثم احذف النسخة القديمة وثبّت الجديدة، وإذا ظهرت رسالة Google Play Protect اختر «مزيد من التفاصيل ← التثبيت على أي حال».",
+                                text = "نسختك الحالية قديمة بتوقيع تجريبي مختلف، لذلك يرفض أندرويد استبدالها مباشرة. تم حفظ التحديث الجديد في مجلد التنزيلات (Downloads) باسم NabdAlDhikr-v${updateInfo.versionName}.apk — احذف التطبيق القديم مرة واحدة فقط ثم ثبّت النسخة الجديدة (ومع حماية جوجل اختر «مزيد من التفاصيل ← التثبيت على أي حال»). كل التحديثات القادمة ستُثبّت من داخل التطبيق دون حذف.",
                                 color = TextPrimary,
                                 fontSize = 11.sp,
                                 lineHeight = 16.sp
@@ -704,7 +752,8 @@ fun AppUpdateDialog(
                                 coroutineScope.launch {
                                     val result = AppUpdateManager.downloadApk(
                                         context = context,
-                                        downloadUrl = updateInfo.apkUrl
+                                        downloadUrl = updateInfo.apkUrl,
+                                        versionName = updateInfo.versionName
                                     ) { progress, downloaded, total ->
                                         downloadProgress = progress
                                         downloadedMb = downloaded

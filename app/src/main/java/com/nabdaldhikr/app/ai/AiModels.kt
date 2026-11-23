@@ -49,7 +49,7 @@ data class OfflineDhikrMetadata(
 
 data class GemmaManifest(
     @SerializedName("schema_version") val schemaVersion: Int = 1,
-    @SerializedName("release_tag") val releaseTag: String = "ai-v1.0.3",
+    @SerializedName("release_tag") val releaseTag: String = "ai-v1.0.4",
     @SerializedName("model_name") val modelName: String = "Gemma 3 (270M) INT8 - Nabd Fine-Tuned",
     @SerializedName("filename") val filename: String = "gemma3-270m-nabd.task",
     @SerializedName("size_bytes") val sizeBytes: Long = 284_072_110L,
