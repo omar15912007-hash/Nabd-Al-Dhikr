@@ -51,11 +51,12 @@ fun NabdAiChatScreen(
     val capability by aiViewModel.capabilityReport.collectAsState()
     val downloadState by aiViewModel.downloadState.collectAsState()
     val isGemmaInstalled by aiViewModel.isGemmaInstalled.collectAsState()
+    val isAiUpdateAvailable by aiViewModel.isAiUpdateAvailable.collectAsState()
     val messages by aiViewModel.chatMessages.collectAsState()
     val isGenerating by aiViewModel.isGenerating.collectAsState()
 
     var inputQuery by remember { mutableStateOf("") }
-    var showModelCard by remember { mutableStateOf(!isGemmaInstalled) }
+    var showModelCard by remember { mutableStateOf(!isGemmaInstalled || isAiUpdateAvailable) }
     val listState = rememberLazyListState()
 
     // Refresh hardware check on open & release ~400MB Gemma 3 RAM immediately on screen exit
@@ -238,6 +239,7 @@ fun NabdAiChatScreen(
                     capability = capability,
                     downloadState = downloadState,
                     isInstalled = isGemmaInstalled,
+                    isUpdateAvailable = isAiUpdateAvailable,
                     onRecheck = { aiViewModel.refreshCapability() },
                     onDownload = { aiViewModel.startGemmaDownload() },
                     onCancel = { aiViewModel.cancelGemmaDownload() },
@@ -273,6 +275,7 @@ private fun Gemma3CompatibilityCard(
     capability: DeviceCapabilityReport,
     downloadState: GemmaDownloadState,
     isInstalled: Boolean,
+    isUpdateAvailable: Boolean,
     onRecheck: () -> Unit,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
@@ -454,20 +457,36 @@ private fun Gemma3CompatibilityCard(
                 }
                 else -> {
                     if (isInstalled) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "نموذج Gemma 3 (270M) مثبّت وجاهز بدون إنترنت ✅",
-                                color = CompletedGreen,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1f)
-                            )
-                            IconButton(onClick = onDelete) {
-                                Icon(Icons.Filled.Delete, contentDescription = "حذف النموذج", tint = BlockedRed, modifier = Modifier.size(18.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (isUpdateAvailable) {
+                                        "يتوفر تحديث مدرب لنموذج الذكاء الاصطناعي (${ModelDownloadManager.GEMMA_RELEASE_TAG}) ✨"
+                                    } else {
+                                        "نموذج Gemma 3 (${ModelDownloadManager.GEMMA_RELEASE_TAG}) مثبّت وجاهز ✅"
+                                    },
+                                    color = if (isUpdateAvailable) PillGold else CompletedGreen,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = onDelete) {
+                                    Icon(Icons.Filled.Delete, contentDescription = "حذف النموذج", tint = BlockedRed, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            if (isUpdateAvailable) {
+                                Button(
+                                    onClick = onDownload,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = PillGold, contentColor = ScreenBg)
+                                ) {
+                                    Text("تحديث نموذج الذكاء الاصطناعي (${ModelDownloadManager.GEMMA_RELEASE_TAG})", fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                                }
                             }
                         }
                     } else {
@@ -477,7 +496,7 @@ private fun Gemma3CompatibilityCard(
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = PillGold, contentColor = ScreenBg)
                         ) {
-                            Text("تحميل Gemma 3 (270M) مجاناً (~240 ميجا)", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("تحميل Gemma 3 (${ModelDownloadManager.GEMMA_RELEASE_TAG}) مجاناً", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
                     }
                 }
@@ -503,6 +522,7 @@ private fun ChatMessageBubble(
         message.sourceType == NabdAiSourceType.FATWA_BLOCKED -> BlockedRed
         message.sourceType == NabdAiSourceType.INTERNET_REQUIRED -> WarningAmber
         message.sourceType == NabdAiSourceType.DORAR_VERIFIED -> CompletedGreen.copy(alpha = 0.7f)
+        message.sourceType == NabdAiSourceType.CONVERSATIONAL -> CompletedGreen.copy(alpha = 0.55f)
         else -> PillGold.copy(alpha = 0.35f)
     }
 
@@ -545,7 +565,8 @@ private fun ChatMessageBubble(
                                     .clip(CircleShape)
                                     .background(
                                         when (message.sourceType) {
-                                            NabdAiSourceType.DORAR_VERIFIED -> CompletedGreen
+                                            NabdAiSourceType.DORAR_VERIFIED,
+                                            NabdAiSourceType.CONVERSATIONAL -> CompletedGreen
                                             NabdAiSourceType.LOCAL_ADHKAR -> PillGold
                                             NabdAiSourceType.INTERNET_REQUIRED -> WarningAmber
                                             else -> BlockedRed
@@ -554,7 +575,7 @@ private fun ChatMessageBubble(
                             )
                             Text(
                                 text = message.sourceBadge + if (message.usedGemma3) " • Gemma 3" else "",
-                                color = if (message.sourceType == NabdAiSourceType.DORAR_VERIFIED) CompletedGreen else PillGold,
+                                color = if (message.sourceType == NabdAiSourceType.DORAR_VERIFIED || message.sourceType == NabdAiSourceType.CONVERSATIONAL) CompletedGreen else PillGold,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold
                             )

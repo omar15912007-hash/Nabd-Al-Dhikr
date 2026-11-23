@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_REPO = "omar15912007-hash/Nabd-Al-Dhikr"
-DEFAULT_TAG = "ai-v1.0.2"
+DEFAULT_TAG = "ai-v1.0.3"
 DEFAULT_FILENAME = "gemma3-270m-nabd.task"
 
 

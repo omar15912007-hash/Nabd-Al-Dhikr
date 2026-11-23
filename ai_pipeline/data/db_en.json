@@ -9351,5 +9351,58 @@
       "How many times?",
       "When to recite it?"
     ]
+  },
+  {
+    "id": "en_worry_azkar_06",
+    "order_index": 3,
+    "language": "en",
+    "category": "Worry Dua",
+    "audit_status": "valid",
+    "audit_notes": "Added authentic Hadith of Ibn Abbas (Bukhari 6346 & Muslim 2730) to Worry Dua.",
+    "dhikr_text": "None has the right to be worshipped except Allah, the Most Great, the Most Forbearing. None has the right to be worshipped except Allah, Lord of the Magnificent Throne. None has the right to be worshipped except Allah, Lord of the heavens, Lord of the earth, and Lord of the Noble Throne.",
+    "transliteration": "La ilaha illallahu al-Azim al-Halim, la ilaha illallahu Rabbul-Arshil-Azim.",
+    "repeat_count_number": 1,
+    "repeat_count_label": "Once (may be repeated mindfully)",
+    "source_reference": "Sahih Al-Bukhari & Muslim — 6346",
+    "short_virtue_for_card": "The Prophet said this during severe distress and grief.",
+    "detailed_explanation": "Authentic supplication of Ibn Abbas reported in Sahih Al-Bukhari (6346) and Sahih Muslim (2730), said during grief, worry, or distress with certainty of heart.",
+    "vocabulary_explanation": [
+      {
+        "word": "Al-Azim",
+        "meaning": "The Most Great in majesty and sovereignty"
+      },
+      {
+        "word": "Al-Halim",
+        "meaning": "The Most Forbearing, Gentle, and Compassionate"
+      }
+    ],
+    "qa_pairs": [
+      {
+        "intent": "Distress and grief supplication (La ilaha illallah al-Azim al-Halim)",
+        "user_questions": [
+          "I feel sad what dua should I read?",
+          "What is the authentic dua for grief and distress?",
+          "Complete la ilaha illallahu al azim al halim",
+          "Dua when upset or anxious about something",
+          "How many times to say la ilaha illallah al azim al halim?",
+          "What does Al-Halim mean in the distress dua?",
+          "Authentic Bukhari dua for sadness",
+          "Relief from anxiety and heavy heart dua",
+          "Prophetic dua when distressed",
+          "Meaning of Lord of the Noble Throne",
+          "Islamic prayer for sorrow",
+          "Source of la ilaha illallah rabbul arshil karim",
+          "What to say when depressed or troubled",
+          "Worry and distress dua repeat count",
+          "Virtue of Ibn Abbas distress supplication"
+        ],
+        "bot_answer": "Say with presence of heart (once, or repeat 3 times when distressed): La ilaha illallahu al-Azim al-Halim... Reported in Sahih Al-Bukhari (6346) and Sahih Muslim."
+      }
+    ],
+    "suggested_followups": [
+      "What does Al-Halim mean?",
+      "How many times repeated?",
+      "What is the source?"
+    ]
   }
 ]

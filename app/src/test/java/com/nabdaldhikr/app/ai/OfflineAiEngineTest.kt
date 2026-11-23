@@ -102,7 +102,39 @@ class OfflineAiEngineTest {
                     id = 1701,
                     text = "اللَّهُمَّ إِنِّي عَبْدُكَ أَنْ تَجْعَلَ الْقُرْآنَ رَبِيعَ قَلْبِي وَجَلَاءَ حُزْنِي وَذَهَابَ هَمِّي",
                     source = "أحمد وابن حبان",
+                    hadithNumber = "3712",
                     virtue = "أذهب الله همه وحزنه وأبدله فرحاً.",
+                    repetition = 1
+                ),
+                Azkar(
+                    id = 1702,
+                    text = "اللَّهُمَّ إِنِّي أَعُوذُ بِكَ مِنَ الْهَمِّ وَالْحَزَنِ، وَالْعَجْزِ وَالْكَسَلِ",
+                    source = "صحيح البخاري",
+                    hadithNumber = "6369",
+                    virtue = "كان النبي ﷺ يكثر من هذا الدعاء العظيم.",
+                    repetition = 1
+                ),
+                Azkar(
+                    id = 1706,
+                    text = "لَا إِلَهَ إِلاَّ اللَّهُ الْعَظِيمُ الْحَلِيمُ، لاَ إِلَهَ إِلاَّ اللَّهُ رَبُّ الْعَرْشِ الْعَظِيمِ، لاَ إِلَهَ إِلاَّ اللَّهُ رَبُّ السَّمَاوَاتِ وَرَبُّ الأَرْضِ وَرَبُّ الْعَرْشِ الْكَرِيمِ.",
+                    source = "صحيح البخاري ومسلم",
+                    hadithNumber = "6346",
+                    virtue = "كان النبي ﷺ يدعو بها عند الكرب والحزن الشديد فيفرج الله به الهم.",
+                    repetition = 1
+                )
+            )
+        ),
+        AzkarCategory(
+            id = "home_enter",
+            nameAr = "دخول المنزل",
+            nameEn = "Entering Home",
+            azkarList = listOf(
+                Azkar(
+                    id = 902,
+                    text = "بِسْمِ اللَّهِ وَلَجْنَا وَبِسْمِ اللَّهِ خَرَجْنَا وَعَلَى رَبِّنَا تَوَكَّلْنَا، ثُمَّ لِيُسَلِّمْ عَلَى أَهْلِهِ.",
+                    source = "أبو داود",
+                    hadithNumber = "5096",
+                    virtue = "ذكر دخول المنزل والسلام على الأهل.",
                     repetition = 1
                 )
             )
@@ -355,8 +387,81 @@ class OfflineAiEngineTest {
         assertTrue(QiblaMathUtils.isMagneticFieldInterfered(120f))
         assertTrue(QiblaMathUtils.isMagneticFieldInterfered(10f))
 
-        // Verify Gemma 3 release tag targets ai-v1.0.2
-        assertTrue(ModelDownloadManager.DEFAULT_MANIFEST_URL.contains("/ai-v1.0.2/"))
-        assertTrue(ModelDownloadManager.DEFAULT_DIRECT_MODEL_URL.contains("/ai-v1.0.2/"))
+        // Verify Gemma 3 release tag targets ai-v1.0.3
+        assertTrue(ModelDownloadManager.DEFAULT_MANIFEST_URL.contains("/ai-v1.0.3/"))
+        assertTrue(ModelDownloadManager.DEFAULT_DIRECT_MODEL_URL.contains("/ai-v1.0.3/"))
+    }
+
+    // =========================================================================
+    // 5. Conversational Greeting, Completion, Sadness Counseling & Multi-Turn Tests
+    // =========================================================================
+
+    @Test
+    fun nabdRouter_handlesIslamicGreetingsWithoutReturningRandomDhikrCard() = runBlocking {
+        val offlineProbe = object : ConnectivityProbe { override fun isOnline(): Boolean = false }
+        val router = NabdAiRouter(connectivityProbe = offlineProbe)
+
+        for (greeting in listOf(
+            "السلام عليكم",
+            "السلام عليكم و رحمة الله و بركاته",
+            "صباح الخير",
+            "ازيك عامل ايه",
+            "شكرا جزيلا"
+        )) {
+            val reply = router.routeQuery(greeting, sampleCategories, emptyMap())
+            assertEquals("Expected CONVERSATIONAL for '$greeting'", NabdAiSourceType.CONVERSATIONAL, reply.sourceType)
+            assertNull("Must NOT attach a random dhikr card for '$greeting'", reply.linkedCategoryId)
+        }
+
+        // Mixed greeting + actual dhikr request MUST both greet AND answer the request
+        val mixed = router.routeQuery("السلام عليكم عايز أذكار الصباح", sampleCategories, emptyMap())
+        assertEquals(NabdAiSourceType.LOCAL_ADHKAR, mixed.sourceType)
+        assertTrue(mixed.answerText.contains("وعليكم السلام"))
+        assertEquals("morning_azkar", mixed.linkedCategoryId)
+    }
+
+    @Test
+    fun nabdRouter_completesPartialAdhkarAndEmpathizesWithSadnessAndFollowUpCounts() = runBlocking {
+        val offlineProbe = object : ConnectivityProbe { override fun isOnline(): Boolean = false }
+        val router = NabdAiRouter(connectivityProbe = offlineProbe)
+
+        // 1. User's partial completion query: "لا اله الا العظيم الحليم لا اله الا الله و كمل"
+        val completion = router.routeQuery(
+            "اذكار الحزن فيها لا اله الا العظيم الحليم لا اله الا الله و كمل انت عارفه",
+            sampleCategories,
+            emptyMap()
+        )
+        assertEquals(NabdAiSourceType.LOCAL_ADHKAR, completion.sourceType)
+        assertEquals(1706, completion.linkedDhikrId)
+        assertTrue(completion.answerText.contains("رَبُّ الْعَرْشِ الْكَرِيمِ"))
+        assertTrue(completion.answerText.contains("6346"))
+
+        // 2. Sadness queries ("انا زعلان" and nuanced "زعلان في حاجة معينة") must give empathetic top adhkar & open index 0 (NOT #3)
+        val sad = router.routeQuery("انا زعلان", sampleCategories, emptyMap())
+        assertEquals(NabdAiSourceType.LOCAL_ADHKAR, sad.sourceType)
+        assertEquals("worry_azkar", sad.linkedCategoryId)
+        assertEquals(0, sad.linkedDhikrIndex)
+        assertTrue(sad.answerText.contains("الْعَظِيمُ الْحَلِيمُ"))
+        assertTrue(sad.answerText.contains("اللَّهُمَّ إِنِّي عَبْدُكَ"))
+
+        val specificSad = router.routeQuery("انا زعلان في حاجة معينة حصلتلي", sampleCategories, emptyMap())
+        assertEquals(NabdAiSourceType.LOCAL_ADHKAR, specificSad.sourceType)
+        assertTrue(specificSad.answerText.contains("هذا الأمر تحديداً"))
+
+        // 3. Multi-turn follow-up: "اقوله كام مره؟" reuses previous active Dhikr context accurately
+        val ctx = AiConversationContext(
+            lastCategoryId = completion.linkedCategoryId,
+            lastCategoryName = "دعاء الهم والحزن",
+            lastDhikrId = completion.linkedDhikrId,
+            lastDhikrIndex = completion.linkedDhikrIndex,
+            lastDhikrText = completion.matchedDhikrText,
+            lastSource = completion.matchedSource,
+            lastHadithNumber = completion.matchedHadithNumber,
+            lastRepetition = completion.matchedRepetition
+        )
+        val countReply = router.routeQuery("أقوله كام مرة؟", sampleCategories, emptyMap(), ctx)
+        assertEquals(NabdAiSourceType.LOCAL_ADHKAR, countReply.sourceType)
+        assertTrue(countReply.answerText.contains("الْعَظِيمُ الْحَلِيمُ"))
+        assertTrue(countReply.answerText.contains("3 مرات") || countReply.answerText.contains("مرة"))
     }
 }

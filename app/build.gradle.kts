@@ -13,10 +13,22 @@ android {
         applicationId = "com.nabdaldhikr.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.0.5"
+        versionCode = 7
+        versionName = "1.0.6"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("nabd-release-key.jks")
+            storePassword = System.getenv("NABD_KEYSTORE_PASS") ?: "NabdAlDhikr@2026!"
+            keyAlias = System.getenv("NABD_KEY_ALIAS") ?: "nabd_release"
+            keyPassword = System.getenv("NABD_KEY_PASS") ?: "NabdAlDhikr@2026!"
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 
@@ -36,7 +48,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

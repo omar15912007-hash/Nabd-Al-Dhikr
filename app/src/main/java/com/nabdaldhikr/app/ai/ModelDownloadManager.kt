@@ -33,9 +33,10 @@ class ModelDownloadManager(
     companion object {
         private const val GITHUB_OWNER = "omar15912007-hash"
         private const val GITHUB_REPO = "Nabd-Al-Dhikr"
-        private const val GEMMA_RELEASE_TAG = "ai-v1.0.2"
+        const val GEMMA_RELEASE_TAG = "ai-v1.0.3"
 
         const val GEMMA_MODEL_FILENAME = "gemma3-270m-nabd.task"
+        private const val INSTALLED_TAG_FILENAME = "installed_tag.txt"
         const val DEFAULT_MANIFEST_URL =
             "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$GEMMA_RELEASE_TAG/gemma_manifest.json"
         const val DEFAULT_DIRECT_MODEL_URL =
@@ -59,6 +60,26 @@ class ModelDownloadManager(
     val state: StateFlow<GemmaDownloadState> = _state.asStateFlow()
 
     fun modelFile(): File = File(modelDir, GEMMA_MODEL_FILENAME)
+
+    private fun tagFile(): File = File(modelDir, INSTALLED_TAG_FILENAME)
+
+    fun installedReleaseTag(): String? {
+        if (!isGemmaInstalled()) return null
+        return try {
+            tagFile().takeIf { it.isFile }?.readText()?.trim()?.ifBlank { null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Returns true when a previous AI model (e.g., ai-v1.0.2) is already downloaded
+     * and the newer fine-tuned release (ai-v1.0.3) should be offered as an AI update.
+     */
+    fun isUpdateAvailable(): Boolean {
+        if (!isGemmaInstalled()) return false
+        return installedReleaseTag() != GEMMA_RELEASE_TAG
+    }
 
     fun isGemmaInstalled(): Boolean = modelFile().isFile && modelFile().length() > 1_000_000L
 
@@ -121,12 +142,17 @@ class ModelDownloadManager(
         val destination = modelFile()
 
         try {
-            if (isFileValid(destination, manifest.sha256)) {
+            if (isFileValid(destination, manifest.sha256) && installedReleaseTag() == GEMMA_RELEASE_TAG) {
                 _state.value = GemmaDownloadState.Ready(
                     modelPath = destination.absolutePath,
                     sizeMb = installedModelSizeMb()
                 )
                 return@withContext Result.success(destination)
+            }
+
+            // Force fresh download when upgrading from an older model tag (e.g. ai-v1.0.2 -> ai-v1.0.3)
+            if (!isFileValid(destination, manifest.sha256) && destination.exists()) {
+                destination.delete()
             }
 
             downloadResumable(
@@ -135,6 +161,7 @@ class ModelDownloadManager(
                 expectedSha256 = manifest.sha256,
                 destination = destination
             )
+            tagFile().writeText(manifest.releaseTag.ifBlank { GEMMA_RELEASE_TAG })
 
             _state.value = GemmaDownloadState.Ready(
                 modelPath = destination.absolutePath,

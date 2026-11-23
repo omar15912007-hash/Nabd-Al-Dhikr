@@ -2,10 +2,10 @@ package com.nabdaldhikr.app.updater
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -31,22 +31,24 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.gson.Gson
-import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.gson.annotations.SerializedName
 import com.nabdaldhikr.app.BuildConfig
 import com.nabdaldhikr.app.ui.theme.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import java.io.IOException
+import java.security.MessageDigest
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 
-/**
- * Data Model for Remote Update Information (version.json or GitHub Release).
- */
 data class UpdateInfo(
     @SerializedName("versionCode")
     val versionCode: Int = 1,
@@ -64,9 +66,6 @@ data class UpdateInfo(
     val forceUpdate: Boolean = false
 )
 
-/**
- * Updater State Machine.
- */
 sealed class UpdateState {
     object Idle : UpdateState()
     object Checking : UpdateState()
@@ -78,80 +77,86 @@ sealed class UpdateState {
 }
 
 /**
- * In-App Auto-Update Manager for Nabd Al-Dhikr.
- * Checks GitHub Releases / raw version.json, downloads APK with real-time progress,
- * and triggers FileProvider-based Package Installer.
+ * Reliable In-App Auto-Update Manager powered by OkHttp:
+ *  - Checks `version.json` with GitHub Releases API fallback.
+ *  - Resumable chunked download via `.part` staging + ZIP (`PK`) header integrity validation.
+ *  - Detects one-time signing certificate transitions (legacy debug key -> permanent release key)
+ *    before calling PackageInstaller so the user sees clear guidance + a direct browser fallback.
  */
 object AppUpdateManager {
 
     private const val GITHUB_OWNER = "omar15912007-hash"
     private const val GITHUB_REPO = "Nabd-Al-Dhikr"
+    private const val PROGRESS_EMIT_INTERVAL_MS = 150L
+    private const val MIN_VALID_APK_BYTES = 1_000_000L
 
     const val RAW_VERSION_URL =
         "https://raw.githubusercontent.com/$GITHUB_OWNER/$GITHUB_REPO/main/version.json"
     const val GITHUB_RELEASES_API =
         "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
 
-    /**
-     * Checks if a newer version is available.
-     * Tries raw version.json first, and falls back to GitHub Releases API.
-     */
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
+
     suspend fun checkForUpdate(
         rawUrl: String = RAW_VERSION_URL,
         fallbackApiUrl: String = GITHUB_RELEASES_API
     ): UpdateState = withContext(Dispatchers.IO) {
-        // Attempt 1: Fetch from raw version.json
+        // Attempt 1: Fast raw version.json on main branch
         try {
-            val url = URL(rawUrl)
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8000
-                readTimeout = 8000
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", "NabdAlDhikr-App")
-            }
+            val req = Request.Builder()
+                .url(rawUrl)
+                .header("Accept", "application/json")
+                .header("Cache-Control", "no-cache")
+                .header("User-Agent", "NabdAlDhikr-App/${BuildConfig.VERSION_NAME}")
+                .build()
 
-            if (conn.responseCode in 200..299) {
-                val json = conn.inputStream.bufferedReader().use { it.readText() }
-                val info = Gson().fromJson(json, UpdateInfo::class.java)
-                if (info != null && info.versionCode > BuildConfig.VERSION_CODE) {
-                    val resolvedApkUrl = if (info.apkUrl.isNotBlank() && !info.apkUrl.contains("/-/")) {
-                        info.apkUrl
-                    } else {
-                        "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/v${info.versionName}/NabdAlDhikr.apk"
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val json = resp.body?.string().orEmpty()
+                    val info = Gson().fromJson(json, UpdateInfo::class.java)
+                    if (info != null && info.versionCode > BuildConfig.VERSION_CODE) {
+                        val resolvedUrl = if (info.apkUrl.isNotBlank() && !info.apkUrl.contains("/-/")) {
+                            info.apkUrl
+                        } else {
+                            "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/v${info.versionName}/NabdAlDhikr.apk"
+                        }
+                        return@withContext UpdateState.UpdateAvailable(info.copy(apkUrl = resolvedUrl))
+                    } else if (info != null) {
+                        return@withContext UpdateState.UpToDate
                     }
-                    return@withContext UpdateState.UpdateAvailable(info.copy(apkUrl = resolvedApkUrl))
-                } else if (info != null) {
-                    return@withContext UpdateState.UpToDate
                 }
             }
         } catch (_: Exception) {
-            // Raw JSON failed or not pushed yet, proceed to GitHub API fallback
+            // Fall back to GitHub Releases REST API
         }
 
-        // Attempt 2: Fallback to GitHub Releases API
+        // Attempt 2: Official GitHub Releases API
         try {
-            val apiUrl = URL(fallbackApiUrl)
-            val apiConn = (apiUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8000
-                readTimeout = 8000
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/vnd.github.v3+json")
-                setRequestProperty("User-Agent", "NabdAlDhikr-App")
-            }
+            val apiReq = Request.Builder()
+                .url(fallbackApiUrl)
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("User-Agent", "NabdAlDhikr-App/${BuildConfig.VERSION_NAME}")
+                .build()
 
-            if (apiConn.responseCode in 200..299) {
-                val jsonText = apiConn.inputStream.bufferedReader().use { it.readText() }
+            httpClient.newCall(apiReq).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return@withContext UpdateState.Error("فشل الاتصال بخادم التحديث (رمز: ${resp.code})")
+                }
+                val jsonText = resp.body?.string().orEmpty()
                 val root = JsonParser.parseString(jsonText).asJsonObject
-
                 val tagName = root.get("tag_name")?.asString ?: "v1.0.0"
                 val body = root.get("body")?.asString ?: "تحسينات عامة وإصلاحات."
 
-                // Look for APK download URL in release assets
                 var apkDownloadUrl = ""
                 if (root.has("assets") && root.get("assets").isJsonArray) {
-                    val assets = root.getAsJsonArray("assets")
-                    for (element in assets) {
+                    for (element in root.getAsJsonArray("assets")) {
                         val assetObj = element.asJsonObject
                         val name = assetObj.get("name")?.asString ?: ""
                         if (name.equals("NabdAlDhikr.apk", ignoreCase = true) || name.endsWith(".apk", ignoreCase = true)) {
@@ -160,39 +165,32 @@ object AppUpdateManager {
                         }
                     }
                 }
-
-                // If no asset found directly, build standard release URL
                 if (apkDownloadUrl.isEmpty()) {
-                    apkDownloadUrl =
-                        "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$tagName/NabdAlDhikr.apk"
+                    apkDownloadUrl = "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/download/$tagName/NabdAlDhikr.apk"
                 }
 
                 val remoteVersionName = tagName.removePrefix("v").trim()
                 val remoteVersionCode = parseVersionCode(remoteVersionName)
-
                 if (remoteVersionCode > BuildConfig.VERSION_CODE) {
-                    val info = UpdateInfo(
-                        versionCode = remoteVersionCode,
-                        versionName = remoteVersionName,
-                        apkUrl = apkDownloadUrl,
-                        changelog = body,
-                        forceUpdate = false
+                    return@withContext UpdateState.UpdateAvailable(
+                        UpdateInfo(
+                            versionCode = remoteVersionCode,
+                            versionName = remoteVersionName,
+                            apkUrl = apkDownloadUrl,
+                            changelog = body,
+                            forceUpdate = false
+                        )
                     )
-                    return@withContext UpdateState.UpdateAvailable(info)
-                } else {
-                    return@withContext UpdateState.UpToDate
                 }
-            } else {
-                return@withContext UpdateState.Error("فشل الاتصال بخادم التحديث (رمز: ${apiConn.responseCode})")
+                return@withContext UpdateState.UpToDate
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: Exception) {
             return@withContext UpdateState.Error(e.localizedMessage ?: "حدث خطأ أثناء فحص التحديثات")
         }
     }
 
-    /**
-     * Converts a semantic version like 1.0.1 to integer code: 1 * 10000 + 0 * 100 + 1 = 10001
-     */
     private fun parseVersionCode(versionName: String): Int {
         return try {
             val parts = versionName.split(".").map { it.filter { ch -> ch.isDigit() } }
@@ -205,80 +203,180 @@ object AppUpdateManager {
         }
     }
 
-    /**
-     * Downloads APK from remote URL with 0%-100% progress tracking.
-     */
     suspend fun downloadApk(
         context: Context,
         downloadUrl: String,
         onProgress: (progress: Float, downloadedMb: Float, totalMb: Float) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
+        val updateDir = context.getExternalFilesDir(null) ?: context.filesDir
+        if (!updateDir.exists()) updateDir.mkdirs()
+
+        val targetFile = File(updateDir, "nabd_aldhikr_update.apk")
+        val partFile = File(updateDir, "nabd_aldhikr_update.apk.part")
+
         try {
-            val url = URL(downloadUrl)
-            val connection = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 15000
-                readTimeout = 40000
-                requestMethod = "GET"
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "NabdAlDhikr-App")
+            var existingBytes = if (partFile.isFile) partFile.length() else 0L
+            val requestBuilder = Request.Builder()
+                .url(downloadUrl)
+                .header("User-Agent", "NabdAlDhikr-Android-Updater")
+            if (existingBytes > 0L) {
+                requestBuilder.header("Range", "bytes=$existingBytes-")
             }
 
-            // Handle HTTP 302 redirects if needed
-            var finalConnection = connection
-            var redirectCount = 0
-            while (finalConnection.responseCode in listOf(301, 302, 303, 307, 308) && redirectCount < 6) {
-                val newUrl = finalConnection.getHeaderField("Location") ?: break
-                finalConnection.disconnect()
-                finalConnection = (URL(newUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 15000
-                    readTimeout = 40000
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", "NabdAlDhikr-App")
+            httpClient.newCall(requestBuilder.build()).execute().use { response ->
+                if (response.code == 416) {
+                    // Range invalid (stale .part file); restart clean once
+                    partFile.delete()
+                    existingBytes = 0L
+                } else if (!response.isSuccessful && response.code != 206) {
+                    return@withContext Result.failure(
+                        IOException("فشل التحميل من الخادم (HTTP ${response.code})")
+                    )
                 }
-                redirectCount++
+
+                val targetResponse = if (response.code == 416) {
+                    httpClient.newCall(
+                        Request.Builder().url(downloadUrl).header("User-Agent", "NabdAlDhikr-Android-Updater").build()
+                    ).execute()
+                } else {
+                    null
+                }
+
+                val activeResponse = targetResponse ?: response
+                try {
+                    if (!activeResponse.isSuccessful && activeResponse.code != 206) {
+                        return@withContext Result.failure(
+                            IOException("فشل التحميل من الخادم (HTTP ${activeResponse.code})")
+                        )
+                    }
+
+                    val appendMode = activeResponse.code == 206 && existingBytes > 0L
+                    val startOffset = if (appendMode) existingBytes else 0L
+                    val body = activeResponse.body ?: return@withContext Result.failure(
+                        IOException("استجابة فارغة من خادم التحديث.")
+                    )
+                    val contentLength = body.contentLength()
+                    val totalBytes = if (contentLength > 0L) startOffset + contentLength else -1L
+
+                    body.byteStream().use { input ->
+                        FileOutputStream(partFile, appendMode).use { output ->
+                            val buffer = ByteArray(32 * 1024)
+                            var totalRead = startOffset
+                            var lastEmitMs = 0L
+
+                            while (true) {
+                                val bytesRead = input.read(buffer)
+                                if (bytesRead == -1) break
+                                output.write(buffer, 0, bytesRead)
+                                totalRead += bytesRead
+
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmitMs >= PROGRESS_EMIT_INTERVAL_MS) {
+                                    lastEmitMs = now
+                                    val progress = if (totalBytes > 0) (totalRead.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f) else 0f
+                                    val downloadedMb = totalRead / (1024f * 1024f)
+                                    val totalMb = if (totalBytes > 0) (totalBytes / (1024f * 1024f)) else 12.5f
+                                    withContext(Dispatchers.Main) {
+                                        onProgress(progress, downloadedMb, totalMb)
+                                    }
+                                }
+                            }
+                            output.flush()
+                            val downloadedMb = totalRead / (1024f * 1024f)
+                            val totalMb = if (totalBytes > 0) (totalBytes / (1024f * 1024f)) else downloadedMb
+                            withContext(Dispatchers.Main) {
+                                onProgress(1f, downloadedMb, totalMb)
+                            }
+                        }
+                    }
+                } finally {
+                    targetResponse?.close()
+                }
             }
 
-            if (finalConnection.responseCode !in 200..299) {
+            if (!isValidApkFile(partFile)) {
+                partFile.delete()
                 return@withContext Result.failure(
-                    Exception("HTTP ${finalConnection.responseCode}: ${finalConnection.responseMessage}")
+                    IOException("الملف المحمّل تالف أو غير مكتمل — يمكنك المحاولة مجدداً أو التحميل عبر المتصفح.")
                 )
             }
 
-            val totalBytes = finalConnection.contentLengthLong
-            val updateDir = context.externalCacheDir ?: context.cacheDir
-            val targetFile = File(updateDir, "nabd_aldhikr_update.apk")
-            if (targetFile.exists()) {
-                targetFile.delete()
+            if (targetFile.exists()) targetFile.delete()
+            if (!partFile.renameTo(targetFile)) {
+                partFile.copyTo(targetFile, overwrite = true)
+                partFile.delete()
             }
 
-            finalConnection.inputStream.use { input ->
-                FileOutputStream(targetFile).use { output ->
-                    val buffer = ByteArray(8192)
-                    var bytesRead: Int
-                    var totalRead = 0L
-
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
-                        val progress = if (totalBytes > 0) (totalRead.toFloat() / totalBytes.toFloat()) else 0f
-                        val downloadedMb = totalRead / (1024f * 1024f)
-                        val totalMb = if (totalBytes > 0) (totalBytes / (1024f * 1024f)) else 0f
-
-                        withContext(Dispatchers.Main) {
-                            onProgress(progress, downloadedMb, totalMb)
-                        }
-                    }
-                }
-            }
             Result.success(targetFile)
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: Exception) {
-            Result.failure(e)
+            Result.failure(IOException(e.localizedMessage ?: "تعذر تنزيل التحديث؛ تأكد من اتصال الإنترنت."))
+        }
+    }
+
+    fun isValidApkFile(file: File): Boolean {
+        if (!file.isFile || file.length() < MIN_VALID_APK_BYTES) return false
+        return try {
+            FileInputStream(file).use { input ->
+                val magic = ByteArray(4)
+                input.read(magic) == 4 &&
+                    magic[0] == 0x50.toByte() &&
+                    magic[1] == 0x4B.toByte() &&
+                    magic[2] == 0x03.toByte() &&
+                    magic[3] == 0x04.toByte()
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
     /**
-     * Checks if install permission from unknown sources is granted.
+     * Compares the SHA-256 signing certificate of the downloaded APK against the currently
+     * installed app. Returns false when upgrading from legacy ephemeral debug builds (<= v1.0.5)
+     * to the permanent production release keystore (>= v1.0.6).
      */
+    fun doSignaturesMatchInstalledApp(context: Context, apkFile: File): Boolean {
+        return try {
+            val pm = context.packageManager
+            val installedHashes = readInstalledCertHashes(pm, context.packageName)
+            val archiveHashes = readArchiveCertHashes(pm, apkFile)
+            if (installedHashes.isEmpty() || archiveHashes.isEmpty()) return true
+            installedHashes.any { it in archiveHashes }
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readInstalledCertHashes(pm: PackageManager, pkgName: String): Set<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNING_CERTIFICATES)
+            val signers = info.signingInfo?.apkContentsSigners.orEmpty()
+            signers.map { sha256Hex(it.toByteArray()) }.toSet()
+        } else {
+            val info = pm.getPackageInfo(pkgName, PackageManager.GET_SIGNATURES)
+            info.signatures.orEmpty().map { sha256Hex(it.toByteArray()) }.toSet()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readArchiveCertHashes(pm: PackageManager, apkFile: File): Set<String> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+            val signers = info?.signingInfo?.apkContentsSigners.orEmpty()
+            signers.map { sha256Hex(it.toByteArray()) }.toSet()
+        } else {
+            val info = pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNATURES)
+            info?.signatures.orEmpty().map { sha256Hex(it.toByteArray()) }.toSet()
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
     fun canInstallPackages(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.packageManager.canRequestPackageInstalls()
@@ -287,9 +385,6 @@ object AppUpdateManager {
         }
     }
 
-    /**
-     * Opens Settings to grant unknown app install permission for this app.
-     */
     fun openInstallPermissionSettings(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manageIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
@@ -300,33 +395,40 @@ object AppUpdateManager {
         }
     }
 
-    /**
-     * Checks unknown sources install permission and triggers package installation.
-     */
-    fun triggerInstall(context: Context, apkFile: File) {
+    fun openInBrowser(context: Context, url: String) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {}
+    }
+
+    fun triggerInstall(context: Context, apkFile: File): Boolean {
         if (!canInstallPackages(context)) {
             openInstallPermissionSettings(context)
-            return
+            return false
         }
 
-        val apkUri: Uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            apkFile
-        )
-
-        val installIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkUri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            val apkUri: Uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                apkFile
+            )
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(installIntent)
+            true
+        } catch (_: Exception) {
+            false
         }
-        context.startActivity(installIntent)
     }
 }
 
-/**
- * Elegant Islamic Emerald & Gold Auto-Update Dialog (Material 3).
- */
 @Composable
 fun AppUpdateDialog(
     updateInfo: UpdateInfo,
@@ -341,34 +443,31 @@ fun AppUpdateDialog(
     var totalMb by remember { mutableFloatStateOf(0f) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var downloadedFile by remember { mutableStateOf<File?>(null) }
+    var hasSignatureConflict by remember { mutableStateOf(false) }
     var awaitingPermission by remember { mutableStateOf(false) }
     var hasInstallPermission by remember { mutableStateOf(AppUpdateManager.canInstallPackages(context)) }
 
-    // Automatically check permission when user returns to app and resume installation
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val granted = AppUpdateManager.canInstallPackages(context)
                 hasInstallPermission = granted
-                if (granted && awaitingPermission && downloadedFile != null && downloadedFile!!.exists()) {
+                val file = downloadedFile
+                if (granted && awaitingPermission && file != null && file.exists() && !hasSignatureConflict) {
                     awaitingPermission = false
-                    AppUpdateManager.triggerInstall(context, downloadedFile!!)
+                    if (!AppUpdateManager.triggerInstall(context, file)) {
+                        errorMessage = "تعذر فتح المثبت مباشرة؛ استخدم خيار التحميل عبر المتصفح بالأسفل."
+                    }
                 }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Dialog(
-        onDismissRequest = {
-            if (!isDownloading && !updateInfo.forceUpdate) {
-                onDismiss()
-            }
-        },
+        onDismissRequest = { if (!isDownloading && !updateInfo.forceUpdate) onDismiss() },
         properties = DialogProperties(
             dismissOnBackPress = !isDownloading && !updateInfo.forceUpdate,
             dismissOnClickOutside = !isDownloading && !updateInfo.forceUpdate
@@ -383,29 +482,25 @@ fun AppUpdateDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(22.dp),
+                    .padding(20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Header Icon Badge
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
+                        .size(52.dp)
                         .clip(CircleShape)
                         .background(HeaderBg)
                         .border(1.dp, PrimaryGold, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = "✨",
-                        fontSize = 24.sp
-                    )
+                    Text(text = "✨", fontSize = 22.sp)
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Text(
                     text = "تحديث جديد متوفر",
-                    fontSize = 20.sp,
+                    fontSize = 19.sp,
                     fontWeight = FontWeight.Bold,
                     color = PrimaryGold,
                     textAlign = TextAlign.Center
@@ -413,7 +508,6 @@ fun AppUpdateDialog(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Version Badge
                 Surface(
                     shape = RoundedCornerShape(8.dp),
                     color = HeaderBg,
@@ -428,9 +522,8 @@ fun AppUpdateDialog(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Changelog Box
                 if (updateInfo.changelog.isNotBlank()) {
                     Text(
                         text = "ما الجديد في هذا التحديث:",
@@ -449,34 +542,32 @@ fun AppUpdateDialog(
                         border = androidx.compose.foundation.BorderStroke(1.dp, CardBorder),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 140.dp)
+                            .heightIn(max = 130.dp)
                     ) {
                         Text(
                             text = updateInfo.changelog,
-                            fontSize = 13.sp,
-                            color = TextPrimary.copy(alpha = 0.9f),
+                            fontSize = 12.5.sp,
+                            color = TextPrimary.copy(alpha = 0.92f),
                             modifier = Modifier
                                 .padding(12.dp)
                                 .verticalScroll(rememberScrollState()),
-                            lineHeight = 20.sp
+                            lineHeight = 19.sp
                         )
                     }
                 }
 
-                // Error message
                 if (errorMessage != null) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = errorMessage ?: "",
-                        color = MaterialTheme.colorScheme.error,
+                        text = errorMessage.orEmpty(),
+                        color = Color(0xFFE57373),
                         fontSize = 12.sp,
                         textAlign = TextAlign.Center
                     )
                 }
 
-                // Progress Indicator
                 if (isDownloading) {
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
                     LinearProgressIndicator(
                         progress = { downloadProgress },
                         modifier = Modifier
@@ -498,15 +589,40 @@ fun AppUpdateDialog(
                             color = PrimaryGold
                         )
                         Text(
-                            text = String.format("%.1f / %.1f MB", downloadedMb, totalMb),
+                            text = String.format(Locale.US, "%.1f / %.1f MB", downloadedMb, totalMb),
                             fontSize = 12.sp,
                             color = TextSecondary
                         )
                     }
                 }
 
-                // Permission guidance card if installation permission is needed
-                if (downloadedFile != null && !hasInstallPermission) {
+                if (downloadedFile != null && hasSignatureConflict) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0x33D4AF37),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, PrimaryGold),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "ترقية التوقيع الرسمي الدائم (لمرة واحدة)",
+                                fontWeight = FontWeight.Bold,
+                                color = PrimaryGold,
+                                fontSize = 12.5.sp
+                            )
+                            Text(
+                                text = "تم توحيد توقيع التطبيق الدائم بدءاً من v1.0.6 حتى لا يفشل التحديث مستقبلاً. إذا ظهر لك «التطبيق غير مثبّت»: حمّل النسخة من المتصفح بالأسفل، ثم احذف النسخة القديمة وثبّت الجديدة، وإذا ظهرت رسالة Google Play Protect اختر «مزيد من التفاصيل ← التثبيت على أي حال».",
+                                color = TextPrimary,
+                                fontSize = 11.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    }
+                } else if (downloadedFile != null && !hasInstallPermission) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Surface(
                         shape = RoundedCornerShape(12.dp),
@@ -526,7 +642,7 @@ fun AppUpdateDialog(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "لتثبيت التحديث تلقائياً، يرجى تفعيل إذن تثبيت التطبيقات من هذا المصدر، وسيتم استكمال التثبيت فوراً عند العودة.",
+                                text = "فعّل «السماح بتثبيت التطبيقات من هذا المصدر»، ولو ظهرت حماية جوجل اضغط «مزيد من التفاصيل ← التثبيت على أي حال».",
                                 color = TextSecondary,
                                 fontSize = 11.sp,
                                 textAlign = TextAlign.Center,
@@ -534,11 +650,19 @@ fun AppUpdateDialog(
                             )
                         }
                     }
+                } else if (downloadedFile != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "ملاحظة حماية جوجل (Play Protect): عند ظهور نافذة الفحص اضغط «مزيد من التفاصيل ← التثبيت على أي حال».",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                        lineHeight = 16.sp
+                    )
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Action Buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -564,9 +688,12 @@ fun AppUpdateDialog(
 
                     Button(
                         onClick = {
-                            if (downloadedFile != null && downloadedFile!!.exists()) {
+                            val currentFile = downloadedFile
+                            if (currentFile != null && currentFile.exists()) {
                                 if (hasInstallPermission) {
-                                    AppUpdateManager.triggerInstall(context, downloadedFile!!)
+                                    if (!AppUpdateManager.triggerInstall(context, currentFile)) {
+                                        errorMessage = "تعذر تشغيل المثبت؛ استخدم رابط التحميل المباشر بالأسفل."
+                                    }
                                 } else {
                                     awaitingPermission = true
                                     AppUpdateManager.openInstallPermissionSettings(context)
@@ -587,11 +714,16 @@ fun AppUpdateDialog(
                                     isDownloading = false
                                     result.onSuccess { file ->
                                         downloadedFile = file
-                                        if (AppUpdateManager.canInstallPackages(context)) {
-                                            AppUpdateManager.triggerInstall(context, file)
-                                        } else {
-                                            awaitingPermission = true
-                                            AppUpdateManager.openInstallPermissionSettings(context)
+                                        hasSignatureConflict = !AppUpdateManager.doSignaturesMatchInstalledApp(context, file)
+                                        if (!hasSignatureConflict) {
+                                            if (AppUpdateManager.canInstallPackages(context)) {
+                                                if (!AppUpdateManager.triggerInstall(context, file)) {
+                                                    errorMessage = "تعذر فتح المثبت؛ استخدم التحميل من المتصفح."
+                                                }
+                                            } else {
+                                                awaitingPermission = true
+                                                AppUpdateManager.openInstallPermissionSettings(context)
+                                            }
                                         }
                                     }.onFailure { err ->
                                         errorMessage = err.localizedMessage ?: "فشل التحميل"
@@ -607,10 +739,20 @@ fun AppUpdateDialog(
                         ),
                         enabled = !isDownloading
                     ) {
+                        Text(text = buttonText, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (!isDownloading && (errorMessage != null || downloadedFile != null || hasSignatureConflict)) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(
+                        onClick = { AppUpdateManager.openInBrowser(context, updateInfo.apkUrl) }
+                    ) {
                         Text(
-                            text = buttonText,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
+                            text = "تحميل مباشر عبر المتصفح (رابط بديل)",
+                            color = PrimaryGold,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
                         )
                     }
                 }

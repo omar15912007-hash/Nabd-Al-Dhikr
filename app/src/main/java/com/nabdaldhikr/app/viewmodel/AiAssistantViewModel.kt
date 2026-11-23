@@ -48,8 +48,13 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
     private val _isGemmaInstalled = MutableStateFlow(downloadManager.isGemmaInstalled())
     val isGemmaInstalled: StateFlow<Boolean> = _isGemmaInstalled.asStateFlow()
 
+    private val _isAiUpdateAvailable = MutableStateFlow(downloadManager.isUpdateAvailable())
+    val isAiUpdateAvailable: StateFlow<Boolean> = _isAiUpdateAvailable.asStateFlow()
+
     private val _offlineMetadata = MutableStateFlow<Map<String, OfflineDhikrMetadata>>(emptyMap())
     val offlineMetadata: StateFlow<Map<String, OfflineDhikrMetadata>> = _offlineMetadata.asStateFlow()
+
+    private var conversationContext = AiConversationContext()
 
     private val _chatMessages = MutableStateFlow(
         listOf(
@@ -92,6 +97,7 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
     fun refreshCapability() {
         _capabilityReport.value = DeviceCapabilityChecker.inspect(getApplication())
         _isGemmaInstalled.value = downloadManager.isGemmaInstalled()
+        _isAiUpdateAvailable.value = downloadManager.isUpdateAvailable()
     }
 
     fun isOnlineNow(): Boolean = connectivityChecker.isOnline()
@@ -103,6 +109,7 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun clearChatHistory() {
+        conversationContext = AiConversationContext()
         _chatMessages.value = listOf(_chatMessages.value.first())
     }
 
@@ -118,6 +125,7 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
         downloadJob = viewModelScope.launch {
             val result = downloadManager.downloadGemma3Model()
             _isGemmaInstalled.value = result.isSuccess && downloadManager.isGemmaInstalled()
+            _isAiUpdateAvailable.value = downloadManager.isUpdateAvailable()
             refreshCapability()
         }
     }
@@ -133,6 +141,7 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
             gemmaEngine.releaseMemory()
             downloadManager.deleteGemmaModel()
             _isGemmaInstalled.value = false
+            _isAiUpdateAvailable.value = false
             refreshCapability()
         }
     }
@@ -167,8 +176,10 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
                 val reply = router.routeQuery(
                     rawQuery = query,
                     categories = categories,
-                    offlineMetadata = _offlineMetadata.value
+                    offlineMetadata = _offlineMetadata.value,
+                    context = conversationContext
                 )
+                updateConversationContext(query, reply, categories)
                 val botMessage = NabdAiChatMessage(
                     id = messageIdCounter.getAndIncrement(),
                     isUser = false,
@@ -186,6 +197,35 @@ class AiAssistantViewModel(application: Application) : AndroidViewModel(applicat
             } finally {
                 _isGenerating.value = false
             }
+        }
+    }
+
+    private fun updateConversationContext(
+        query: String,
+        reply: NabdAiReply,
+        categories: List<AzkarCategory>
+    ) {
+        val updatedTurns = (conversationContext.recentTurns + (query to reply.answerText)).takeLast(4)
+        if (!reply.matchedDhikrText.isNullOrBlank() && reply.sourceType != NabdAiSourceType.CONVERSATIONAL) {
+            val catName = reply.linkedCategoryId?.let { cid ->
+                categories.firstOrNull { it.id == cid }?.nameAr
+            } ?: conversationContext.lastCategoryName
+            conversationContext = conversationContext.copy(
+                lastCategoryId = reply.linkedCategoryId ?: conversationContext.lastCategoryId,
+                lastCategoryName = catName,
+                lastDhikrId = reply.linkedDhikrId ?: conversationContext.lastDhikrId,
+                lastDhikrIndex = reply.linkedDhikrIndex,
+                lastDhikrText = reply.matchedDhikrText,
+                lastSource = reply.matchedSource ?: conversationContext.lastSource,
+                lastHadithNumber = reply.matchedHadithNumber ?: conversationContext.lastHadithNumber,
+                lastRepetition = reply.matchedRepetition ?: conversationContext.lastRepetition,
+                lastShortVirtue = reply.matchedShortVirtue ?: conversationContext.lastShortVirtue,
+                lastDetailedExplanation = reply.matchedDetailedExplanation ?: conversationContext.lastDetailedExplanation,
+                lastVocabulary = if (reply.matchedVocabulary.isNotEmpty()) reply.matchedVocabulary else conversationContext.lastVocabulary,
+                recentTurns = updatedTurns
+            )
+        } else {
+            conversationContext = conversationContext.copy(recentTurns = updatedTurns)
         }
     }
 

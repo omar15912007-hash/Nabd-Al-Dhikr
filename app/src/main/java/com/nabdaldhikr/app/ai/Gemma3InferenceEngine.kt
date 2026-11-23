@@ -8,17 +8,21 @@ import java.io.File
 
 interface GemmaTextGenerator : AutoCloseable {
     val isModelAvailable: Boolean
-    suspend fun formulateGroundedAnswer(userQuery: String, verifiedContext: String): String?
+    suspend fun formulateGroundedAnswer(
+        userQuery: String,
+        verifiedContext: String,
+        recentTurns: List<Pair<String, String>> = emptyList()
+    ): String?
     fun releaseMemory()
 }
 
 /**
  * On-device Gemma 3 (270M) Inference Engine powered by MediaPipe GenAI (`tasks-genai`).
  *
- * Memory Discipline:
+ * Memory & Safety Discipline:
  *  - Lazily loads `gemma3-270m-nabd.task` (~400MB active inference RAM) ONLY when invoked.
  *  - Immediately releases native memory via `releaseMemory()` when the user closes `NabdAiChatScreen`.
- *  - Strictly grounded in verified RAG / Dorar.net passages (never invents Hadiths or issues fatwas).
+ *  - Validates generated output is coherent Arabic text and never leaks prompt markers or garbled loops.
  */
 class Gemma3InferenceEngine(
     private val context: Context,
@@ -38,16 +42,20 @@ class Gemma3InferenceEngine(
 
     override suspend fun formulateGroundedAnswer(
         userQuery: String,
-        verifiedContext: String
+        verifiedContext: String,
+        recentTurns: List<Pair<String, String>>
     ): String? = withContext(Dispatchers.Default) {
         if (!isModelAvailable) return@withContext null
 
         val inference = getOrCreateInference() ?: return@withContext null
-        val prompt = buildGemma3GroundedPrompt(userQuery, verifiedContext)
+        val prompt = buildGemma3GroundedPrompt(userQuery, verifiedContext, recentTurns)
 
         return@withContext try {
-            val raw = inference.generateResponse(prompt).trim()
-            if (raw.length < 10) null else raw
+            val raw = inference.generateResponse(prompt)
+                .replace("<end_of_turn>", "")
+                .replace("<eos>", "")
+                .trim()
+            if (isCoherentArabicOutput(raw)) raw else null
         } catch (_: Exception) {
             null
         }
@@ -63,7 +71,7 @@ class Gemma3InferenceEngine(
             return try {
                 val options = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(file.absolutePath)
-                    .setMaxTokens(512)
+                    .setMaxTokens(320)
                     .build()
                 LlmInference.createFromOptions(context, options).also {
                     llmInference = it
@@ -75,7 +83,7 @@ class Gemma3InferenceEngine(
     }
 
     /**
-     * Releases the ~400MB native inference memory immediately when leaving chat.
+     * Releases the ~400MB active native inference memory immediately when leaving chat.
      */
     override fun releaseMemory() {
         synchronized(lock) {
@@ -92,18 +100,45 @@ class Gemma3InferenceEngine(
         releaseMemory()
     }
 
-    private fun buildGemma3GroundedPrompt(userQuery: String, verifiedContext: String): String {
-        return """<start_of_turn>user
-أنت مساعد «نبض AI» للأذكار النبوية الصحيحة فقط.
-قواعد صارمة:
-1. اعتمد حصراً على النص الموثّق التالي ولا تخترع أي حديث أو آية.
-2. لا تُصدر أي فتوى فقهية أو حكم حلال وحرام أبداً.
-3. أجب بالعربية الفصحى الدافئة والميسّرة في 3 إلى 4 أسطر فقط.
+    private fun isCoherentArabicOutput(text: String): Boolean {
+        if (text.length < 15) return false
+        val arabicChars = text.count { it in '\u0600'..'\u06FF' }
+        if (arabicChars < 10) return false
+        // Reject hallucinated prompt headers or repetitive token collapse
+        val words = text.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (words.size >= 8 && words.distinct().size <= 2) return false
+        return true
+    }
 
-النص الموثّق:
+    private fun buildGemma3GroundedPrompt(
+        userQuery: String,
+        verifiedContext: String,
+        recentTurns: List<Pair<String, String>>
+    ): String {
+        val historyBlock = if (recentTurns.isNotEmpty()) {
+            buildString {
+                append("سياق المحادثة السابق:\n")
+                recentTurns.takeLast(2).forEach { (u, a) ->
+                    append("- المستخدم: ").append(u.take(120)).append('\n')
+                    append("- المساعد: ").append(a.take(160)).append('\n')
+                }
+                append('\n')
+            }
+        } else {
+            ""
+        }
+
+        return """<start_of_turn>user
+أنت «نبض AI»، مساعد أذكار إسلامي حنون ودقيق.
+قواعد صارمة:
+1. قدّم مقدمة إنسانية دافئة ومختصرة تناسب مشاعر وسؤال المستخدم في سطر أو سطرين.
+2. لا تغيّر نص الذكر أو الحديث الموثّق ولا تخترع حديثاً أو عدد تكرار غير موجود في المرجع.
+3. لا تصدر أي فتوى فقهية أبداً.
+
+${historyBlock}المرجع الموثّق:
 $verifiedContext
 
-سؤال المستخدم:
+رسالة المستخدم:
 $userQuery
 <end_of_turn>
 <start_of_turn>model

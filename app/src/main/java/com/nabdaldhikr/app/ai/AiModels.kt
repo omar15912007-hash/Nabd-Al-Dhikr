@@ -49,10 +49,10 @@ data class OfflineDhikrMetadata(
 
 data class GemmaManifest(
     @SerializedName("schema_version") val schemaVersion: Int = 1,
-    @SerializedName("release_tag") val releaseTag: String = "ai-v1.0.2",
-    @SerializedName("model_name") val modelName: String = "Gemma 3 (270M) INT8",
+    @SerializedName("release_tag") val releaseTag: String = "ai-v1.0.3",
+    @SerializedName("model_name") val modelName: String = "Gemma 3 (270M) INT8 - Nabd Fine-Tuned",
     @SerializedName("filename") val filename: String = "gemma3-270m-nabd.task",
-    @SerializedName("size_bytes") val sizeBytes: Long = 251_658_240L,
+    @SerializedName("size_bytes") val sizeBytes: Long = 284_072_110L,
     @SerializedName("sha256") val sha256: String = "",
     @SerializedName("url") val url: String = "",
     @SerializedName("min_ram_gb") val minRamGb: Float = 3.0f,
@@ -113,8 +113,24 @@ enum class NabdAiSourceType {
     LOCAL_ADHKAR,
     DORAR_VERIFIED,
     INTERNET_REQUIRED,
-    FATWA_BLOCKED
+    FATWA_BLOCKED,
+    CONVERSATIONAL
 }
+
+data class AiConversationContext(
+    val lastCategoryId: String? = null,
+    val lastCategoryName: String? = null,
+    val lastDhikrId: Int? = null,
+    val lastDhikrIndex: Int = 0,
+    val lastDhikrText: String? = null,
+    val lastSource: String? = null,
+    val lastHadithNumber: String? = null,
+    val lastRepetition: Int? = null,
+    val lastShortVirtue: String? = null,
+    val lastDetailedExplanation: String? = null,
+    val lastVocabulary: List<VocabEntry> = emptyList(),
+    val recentTurns: List<Pair<String, String>> = emptyList()
+)
 
 data class LocalDhikrMatch(
     val categoryId: String,
@@ -141,6 +157,12 @@ data class NabdAiReply(
     val linkedDhikrId: Int? = null,
     val linkedDhikrIndex: Int = 0,
     val matchedDhikrText: String? = null,
+    val matchedSource: String? = null,
+    val matchedHadithNumber: String? = null,
+    val matchedRepetition: Int? = null,
+    val matchedShortVirtue: String? = null,
+    val matchedDetailedExplanation: String? = null,
+    val matchedVocabulary: List<VocabEntry> = emptyList(),
     val usedGemma3: Boolean = false,
     val latencyMs: Long = 0L
 )

@@ -4,19 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Primary GitHub Release tag for Gemma 3 (270M)'
+        description: 'Primary GitHub Release tag for Fine-Tuned Gemma 3 (270M)'
         required: true
-        default: 'ai-v1.0.2'
+        default: 'ai-v1.0.3'
       mirror_tags:
-        description: 'Optional comma-separated compatibility tags (e.g. gemma3-v1.0.0)'
+        description: 'Optional comma-separated compatibility tags (e.g. ai-v1.0.2,gemma3-v1.0.0)'
         required: false
-        default: 'gemma3-v1.0.0'
+        default: 'ai-v1.0.2,gemma3-v1.0.0'
       hf_model_id:
-        description: 'Public HuggingFace Gemma 3 270M repo to convert when model_download_url is empty'
+        description: 'Public HuggingFace Gemma 3 270M repo to fine-tune and convert when model_download_url is empty'
         required: false
         default: 'unsloth/gemma-3-270m-it'
+      train_steps:
+        description: 'Domain fine-tuning steps on Arabic Adhkar curriculum'
+        required: false
+        default: '60'
       model_download_url:
-        description: 'Optional direct URL to a pre-built MediaPipe .task bundle (leave empty to convert automatically)'
+        description: 'Optional direct URL to a pre-built MediaPipe .task bundle (leave empty to fine-tune + convert automatically)'
         required: false
         default: ''
 
@@ -37,11 +41,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build or Download Gemma 3 (270M) MediaPipe .task Bundle
+      - name: Fine-Tune & Convert Gemma 3 (270M) MediaPipe .task Bundle
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           MODEL_URL: ${{ github.event.inputs.model_download_url }}
           HF_MODEL_ID: ${{ github.event.inputs.hf_model_id || 'unsloth/gemma-3-270m-it' }}
+          TRAIN_STEPS: ${{ github.event.inputs.train_steps || '60' }}
         run: |
           set -euo pipefail
           mkdir -p gemma_dist gemma_ckpt gemma_tflite
@@ -54,7 +59,7 @@ jobs:
               curl -fL "$MODEL_URL" -o gemma_dist/gemma3-270m-nabd.task
             fi
           else
-            echo "Converting $HF_MODEL_ID to MediaPipe INT8 .task bundle using litert-torch..."
+            echo "Preparing conversion environment and downloading $HF_MODEL_ID..."
 
             python3 -m venv venv_convert
             venv_convert/bin/pip install --upgrade pip
@@ -80,6 +85,16 @@ jobs:
           print("Downloaded checkpoint files:", sorted(os.listdir("gemma_ckpt")))
           PYEOF
 
+            if [ "${TRAIN_STEPS}" -gt 0 ]; then
+              echo "Fine-tuning Gemma 3 (270M) on Nabd AI Arabic Adhkar curriculum ($TRAIN_STEPS steps)..."
+              venv_convert/bin/python ai_pipeline/train_gemma3_nabd.py \
+                --checkpoint_dir gemma_ckpt \
+                --repo_root . \
+                --steps "${TRAIN_STEPS}" \
+                --lr 2e-5
+            fi
+
+            echo "Converting fine-tuned Gemma 3 checkpoint to INT8 TFLite..."
             venv_convert/bin/python -m litert_torch.generative.examples.gemma3.convert_gemma3_to_tflite \
               --model_size=270m \
               --quantize=dynamic_int8 \
@@ -118,7 +133,7 @@ jobs:
               enable_bytes_to_unicode_mapping=False,
           )
           bundler.create_bundle(config)
-          print("Created MediaPipe .task bundle successfully.")
+          print("Created fine-tuned MediaPipe .task bundle successfully.")
           PYEOF
           fi
 
@@ -132,7 +147,7 @@ jobs:
       - name: Generate SHA-256 Manifest & Publish to GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.event.inputs.release_tag || 'ai-v1.0.2' }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag || 'ai-v1.0.3' }}
           MIRROR_TAGS: ${{ github.event.inputs.mirror_tags }}
         run: |
           python3 ai_pipeline/publish_gemma3_release.py \
